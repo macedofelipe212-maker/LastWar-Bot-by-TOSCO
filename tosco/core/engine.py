@@ -7,7 +7,7 @@ import threading
 import time
 import traceback
 
-from . import rapid, screens, winapi
+from . import catalog, rapid, screens, winapi
 from .backends import make_backend
 from .config import Counters
 from .ocr import OCR, norm
@@ -205,12 +205,13 @@ class Context:
         if not self.ai_on(name):
             return []
         frame = self.frame(fresh=False) if frame is None else frame
-        det = self.e.yolo.detect(frame, self.cfg.get("ai_model", "preciso"))
-        base = float(self.cfg.get("ai_threshold", 0.5))
+        # corte baixo aqui: cada classe aplica a sua confiança (algumas valem a partir de 0,20 — barra de vigor)
+        det = self.e.yolo.detect(frame, self.cfg.get("ai_model", "preciso"), conf=0.2)
         fh, fw = frame.shape[:2]
         out = []
         for c in YOLO_TARGETS[name]:
-            cls, thr = c if isinstance(c, tuple) else (c, base)
+            cls, fixed = c if isinstance(c, tuple) else (c, None)
+            thr = catalog.threshold(cls, self.cfg, fixed)  # seu ajuste na tela da IA > fixo da tarefa > padrão
             for x, y, sc, bw, bh in det.get(cls, []):
                 if sc < thr:
                     continue
@@ -435,14 +436,21 @@ class Context:
         if not self.ai_on(name):
             hit = self.wait_for(name, timeout)
             return (hit[0], hit[1], 1.0, 0, 0) if hit else None
-        base = base or float(self.cfg.get("ai_threshold", 0.5))
-        thr = [max(floor, base - i * (base - floor) / max(1, steps - 1)) for i in range(steps)]
+        def ladder(start):
+            lo = min(floor, start)  # classe com padrão abaixo do piso (ex.: barra de vigor 0,20) começa nele
+            return [max(lo, start - k * (start - lo) / max(1, steps - 1)) for k in range(steps)]
+
+        # a escada começa na confiança de CADA classe (seu ajuste > fixo da tarefa > padrão do catálogo)
+        ladders = []
+        for c in YOLO_TARGETS[name]:
+            cls, fixed = c if isinstance(c, tuple) else (c, None)
+            ladders.append((cls, ladder(base or catalog.threshold(cls, self.cfg, fixed))))
+        low = min(min(l) for _, l in ladders)
         end, i = time.time() + timeout, 0
         while True:
             f = self.frame()
-            for c in YOLO_TARGETS[name]:
-                cls = c[0] if isinstance(c, tuple) else c
-                for d in self.dets(f, conf=min(thr)).get(cls, []):
+            for cls, thr in ladders:
+                for d in self.dets(f, conf=low).get(cls, []):
                     if d[2] >= thr[min(i, len(thr) - 1)]:
                         return d
             i += 1

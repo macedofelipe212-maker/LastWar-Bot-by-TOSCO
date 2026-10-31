@@ -27,6 +27,7 @@ DEFAULTS = {
     "ai_enabled": True,                   # IA de reconhecimento (data/modelos/*.onnx)
     "ai_model": "preciso",                # preciso (1280 px, ~0,4 s) | rapido (640 px, ~0,1 s; perde ícones pequenos)
     "ai_threshold": 0.5,
+    "ai_class_thresholds": {},            # ajustes por tipo de botão feitos na tela "Estúdio visual (IA)"
     "guard_clicks": True,                 # nunca toca perto de "Comprar", preço, "Terminar agora"… (core/screens.py)
     "relog_wait_min": 10,                 # conta aberta no celular: espera antes de reconectar
     "pause_on_user": True,                # você mexeu no mouse/teclado → pausa (o mouse é o mesmo)

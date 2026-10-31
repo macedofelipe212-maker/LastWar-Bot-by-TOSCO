@@ -90,6 +90,12 @@ QComboBox::drop-down {{ border: none; width: 18px; }}
 QComboBox QAbstractItemView {{ background: {PANEL}; border: 1px solid {CYAN}; selection-background-color: rgba(0,229,255,0.25); }}
 QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 0; }}
 
+QSlider::groove:horizontal {{ height: 4px; background: #13223a; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {AMBER}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {AMBER}; border: 2px solid #2a1a04; width: 12px; height: 12px;
+                              margin: -5px 0; border-radius: 7px; }}
+QSlider::handle:horizontal:hover {{ background: #ffd27a; }}
+
 QCheckBox {{ spacing: 8px; }}
 QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {MUTED}; background: #060b16; border-radius: 2px; }}
 QCheckBox::indicator:checked {{ background: {CYAN}; border: 1px solid {CYAN}; }}

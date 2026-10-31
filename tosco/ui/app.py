@@ -8,14 +8,14 @@ import time
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QSize, Qt, QTime, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QTextCharFormat
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPixmap, QTextCharFormat
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
                                QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget)
 
-from ..core import winapi
+from ..core import catalog, winapi
 from ..core.backends import ADBBackend, find_adb
 from ..core.engine import DAYS, AutoClicker, Engine
 from ..core.paths import DATA_DIR, PRINT_DIR, REPORT_DIR, ROOT, TEMPLATE_DIR
@@ -24,6 +24,7 @@ from ..tasks import ALL_TASKS, all_templates
 from . import theme as T
 from .i18n import LANGS, set_lang, tr
 from .cards import TaskPage
+from .vision_page import VisionPage
 from .widgets import Card, CaptureCanvas, GridBackground, Radar, StatCard, Toggle, bgr_to_pixmap, make_icon
 
 LEVEL_COLORS = {"info": T.TEXT, "warn": T.AMBER, "error": T.RED}
@@ -130,7 +131,9 @@ NAV = [
         ("map", "◎", "Scanner de mapa", "Lista o que há em volta da sua cidade, com botão IR."),
         ("clicker", "⌖", "Clique automático", "Clica sem parar num ponto da tela."),
         ("advanced", "⌘", "Rotinas", "Seus próprios passos e varredura agendada do mapa."),
-        ("studio", "▣", "Estúdio de imagens", "Capture e teste o que o TOSCO reconhece no jogo."),
+        ("vision", "◉", "Estúdio visual (IA)", "O que a IA reconhece no jogo, com miniatura e nome de cada coisa. "
+                                                "Ajuste a confiança e veja ao vivo o que ela enxerga."),
+        ("studio", "▣", "Estúdio de imagens", "Suas próprias imagens: capture, recorte, importe e teste."),
     ]),
     ("CONFIGURAÇÃO", [
         ("t:shield", "⛨", "Escudo Automático", "Ativa e renova o escudo."),
@@ -196,6 +199,7 @@ class MainWindow(QMainWindow):
         self.page_index, self.task_pages = {}, []
         builders = {"dash": self._page_dash, "map": self._page_map, "agenda": self._page_agenda,
                     "clicker": self._page_clicker, "studio": self._page_studio, "system": self._page_system,
+                    "vision": lambda: VisionPage(self),
                     "log": self._page_log, "phone": self._page_phone}
         tasks = {t.id: t for t in ALL_TASKS}
         for _, items in NAV:
@@ -832,7 +836,8 @@ class MainWindow(QMainWindow):
                            f"{self.cfg.data['hotkeys'].get('capture', 'f8').upper()}. Tamanho do quadrado:"), 1)
         f8.addWidget(self.f8_size)
         right.lay.addLayout(f8)
-        right.lay.addWidget(muted("● capturado   ◐ aprende sozinho pelo texto (OCR)   ○ falta capturar"))
+        right.lay.addWidget(muted("● imagem sua   ◉ a IA já reconhece sozinha (miniatura = como é no jogo)   "
+                                  "◐ acha pelo texto (OCR)   ○ falta capturar"))
         lay.addWidget(right, 3)
         self._fill_templates()
         return w
@@ -1118,14 +1123,23 @@ class MainWindow(QMainWindow):
         cur = self.tpl_list.currentItem().data(Qt.UserRole) if self.tpl_list.currentItem() else None
         q = self.tpl_filter.text().lower().strip()
         self.tpl_list.clear()
+        self.tpl_list.setIconSize(QSize(28, 28))
         for name, desc, owner, auto in self._studio_names():
-            if q and q not in (name + desc + owner).lower():
+            cls = catalog.target_class(name)
+            pt = catalog.label(cls) if cls else ""
+            if q and q not in (name + desc + owner + pt).lower():
                 continue
             n = self.engine.vision.count(name)
-            mark, col = ("●", T.LIME) if n else (("◐", T.CYAN) if auto else ("○", T.MUTED))
-            it = QListWidgetItem(f"{mark}  {name}" + (f"  ×{n}" if n > 1 else ""))
+            # ● imagem sua · ◉ a IA reconhece sozinha · ◐ acha pelo texto · ○ falta capturar
+            mark, col = (("●", T.LIME) if n else ("◉", T.CYAN) if cls and self.engine.yolo.available()
+                         else ("◐", T.CYAN) if auto else ("○", T.MUTED))
+            it = QListWidgetItem(f"{mark}  {pt or desc or name}" + (f"  ×{n}" if n > 1 else "")
+                                 + (f"\n      {name}" if (pt or desc) else ""))
+            thumb = catalog.thumb(cls) if cls else None
+            if thumb:
+                it.setIcon(QIcon(thumb))
             it.setData(Qt.UserRole, name)
-            it.setToolTip(f"{owner}: {desc}")
+            it.setToolTip(f"{owner}: {desc}" + (f"\nIA: {pt}" if pt else ""))
             it.setForeground(QColor(col))
             self.tpl_list.addItem(it)
             if name == cur:
@@ -1154,11 +1168,17 @@ class MainWindow(QMainWindow):
         name = it.data(Qt.UserRole)
         desc, owner, auto = next(((d, o, a) for n, d, o, a in self._studio_names() if n == name),
                                  ("", "Meus", False))
-        self.tpl_info.setText(f"{name}\n{desc} · {owner}" + ("\n(acha pelo texto; capturar é opcional)" if auto else ""))
+        cls = catalog.target_class(name)
+        ia = (f"\n◉ A IA já reconhece isto sozinha: {catalog.label(cls)} — capturar é opcional" if cls else "")
+        self.tpl_info.setText(f"{name}\n{desc} · {owner}" + ("\n(acha pelo texto; capturar é opcional)" if auto else "")
+                              + ia)
         self.save_target.setText(f"3 · SALVAR EM:  {name}")
         img = self.engine.vision.load(name)
+        thumb = catalog.thumb(cls) if cls else None
         if img is not None:
             self.tpl_thumb.setPixmap(bgr_to_pixmap(img).scaled(330, 76, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        elif thumb:  # sem imagem sua: mostra como é no jogo (miniatura da IA) para você saber do que se trata
+            self.tpl_thumb.setPixmap(QPixmap(thumb).scaled(330, 76, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self.tpl_thumb.clear()
             self.tpl_thumb.setText("sem imagem")
