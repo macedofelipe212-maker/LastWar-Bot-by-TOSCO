@@ -215,6 +215,15 @@ def reset_my_thumb(cls):
         os.remove(p)
 
 
+def targets_for(cls):
+    """Nomes do Estúdio de imagens (alvos do TOSCO) que usam esta classe da IA. Ex.: 'march_icon' -> ['btn_march']."""
+    out = []
+    for name, classes in YOLO_TARGETS.items():
+        if any((c[0] if isinstance(c, tuple) else c) == cls for c in classes):
+            out.append(name)
+    return out
+
+
 def target_class(name):
     """Classe principal da IA para um alvo do TOSCO (ex.: 'btn_march' -> 'march_icon'), ou None."""
     classes = YOLO_TARGETS.get(name)

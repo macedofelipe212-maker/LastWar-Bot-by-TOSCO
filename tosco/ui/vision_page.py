@@ -81,14 +81,25 @@ class ItemDialog(QDialog):
             self.live.setText("A IA não viu isto no último print.\n\nAbra no jogo a tela onde isto aparece\n"
                               "e clique em  ⟳ O QUE A IA VÊ AGORA.")
         v.addLayout(row)
+        self.names = catalog.targets_for(cls)
+        vis = self.page.engine.vision
+        if self.names:
+            linked = ", ".join(f"{n} ({'●' if vis.has(n) else '○'})" for n in self.names)
+            v.addWidget(_muted(f"Ligado ao Estúdio de imagens: {linked}   (● já tem imagem sua · ○ ainda não)"))
+        else:
+            v.addWidget(_muted("Nenhuma tarefa do TOSCO usa isto ainda — por isso não aparece no Estúdio de imagens."))
         help_ = _muted(SLIDER_HELP)
         help_.setWordWrap(True)
         v.addWidget(help_)
         bar = QHBoxLayout()
-        b = _btn("📷 Usar o recorte do meu jogo como foto", "go", self._use_live,
-                 "Troca a foto de exemplo pelo que a IA achou no seu jogo agora")
+        b = _btn("📷 Usar o recorte do meu jogo", "go", self._use_live,
+                 "Vira a foto daqui E a imagem do Estúdio de imagens (o TOSCO procura essa imagem antes da IA: "
+                 "mais rápido e exato na sua tela)")
         b.setEnabled(self.crop is not None)
         bar.addWidget(b)
+        if self.names:
+            bar.addWidget(_btn("▣ Abrir no Estúdio de imagens", None, self._open_studio1,
+                               "Vai para o Estúdio de imagens já com este nome escolhido"))
         bar.addWidget(_btn("📂 Trocar por arquivo…", None, self._from_file, "Escolhe um PNG/JPG do seu PC"))
         r = _btn("↺ Voltar à original", None, self._reset)
         r.setEnabled(catalog.is_mine(cls) and catalog.original_thumb(cls) is not None)
@@ -116,7 +127,21 @@ class ItemDialog(QDialog):
 
     def _use_live(self):
         catalog.save_my_thumb(self.card.cls, self.crop)
+        # o mesmo recorte vira imagem no Estúdio de imagens de cada nome ligado: o TOSCO procura a imagem SUA
+        # primeiro (template, exato na sua tela) e só depois a IA
+        img = self.page._last_img
+        vis = self.page.engine.vision
+        for n in self.names:
+            vis.save(n, self.crop, img.shape[1], vis.next_variant(n), source_height=img.shape[0])
+        if self.names:
+            self.page.engine.log(f"▣ Recorte de '{self.card.name}' salvo também no Estúdio de imagens: "
+                                 + ", ".join(self.names))
+        self.page.win.refresh_studio()
         self._done()
+
+    def _open_studio1(self):
+        self.accept()
+        self.page.win.open_studio(self.names[0])
 
     def _from_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Escolher foto", "", "Imagens (*.png *.jpg *.jpeg *.bmp *.webp)")

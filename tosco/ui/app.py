@@ -199,7 +199,7 @@ class MainWindow(QMainWindow):
         self.page_index, self.task_pages = {}, []
         builders = {"dash": self._page_dash, "map": self._page_map, "agenda": self._page_agenda,
                     "clicker": self._page_clicker, "studio": self._page_studio, "system": self._page_system,
-                    "vision": lambda: VisionPage(self),
+                    "vision": self._page_vision,
                     "log": self._page_log, "phone": self._page_phone}
         tasks = {t.id: t for t in ALL_TASKS}
         for _, items in NAV:
@@ -374,10 +374,34 @@ class MainWindow(QMainWindow):
     def open_studio(self, name):
         self._go_page(self.page_index["studio"])
         self.nav.button(self.page_index["studio"]).setChecked(True)
+        self.tpl_filter.clear()
+        self._fill_templates()
         for i in range(self.tpl_list.count()):
             if self.tpl_list.item(i).data(Qt.UserRole) == name:
                 self.tpl_list.setCurrentRow(i)
                 break
+
+    def _page_vision(self):
+        self.vision_page = VisionPage(self)
+        return self.vision_page
+
+    def open_vision(self, cls):
+        """Estúdio de imagens -> Estúdio visual, já filtrado no tipo da IA ligado a este nome."""
+        self._go_page(self.page_index["vision"])
+        self.nav.button(self.page_index["vision"]).setChecked(True)
+        self.vision_page.filter.setText(catalog.label(cls))
+
+    def refresh_studio(self):
+        """Depois que o Estúdio visual salva uma imagem: atualiza a lista e as miniaturas do Estúdio de imagens."""
+        self._fill_templates()
+        self._tpl_selected(self.tpl_list.currentItem())
+
+    def _studio_open_vision(self):
+        cls = catalog.target_class(self._current_tpl() or "")
+        if not cls:
+            self._studio_msg("Este nome não é reconhecido pela IA — use as imagens daqui (capturar/importar).", False)
+            return
+        self.open_vision(cls)
 
     def _go_page(self, i):
         self.stack.setCurrentIndex(i)
@@ -772,6 +796,8 @@ class MainWindow(QMainWindow):
         vb.addWidget(button("🗑 apagar esta", "ghost", self._studio_delete_variant, "Apaga só a imagem selecionada acima"))
         vb.addWidget(button("🗑 todas", "ghost", self._studio_delete, "Apaga todas as imagens deste nome"))
         vb.addWidget(button("📁 pasta", "ghost", lambda: self._open_dir(TEMPLATE_DIR), "Abre data\\templates"))
+        vb.addWidget(button("◉ IA", "ghost", self._studio_open_vision,
+                            "Abre este nome no Estúdio visual (IA): foto, confiança e o que a IA vê agora"))
         left.lay.addLayout(vb)
         left.lay.addWidget(button("✚ NOVO NOME…", None, self._studio_new_name,
                                   "Cria um nome seu (ex.: para usar em 'toque <nome>' nas Rotinas)"))
