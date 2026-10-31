@@ -9,6 +9,15 @@ from .targets import YOLO_TARGETS
 
 THUMB_DIR = os.path.join(DATA_DIR, "miniaturas")
 MY_THUMB_DIR = os.path.join(DATA_DIR, "miniaturas_minhas")  # fotos trocadas por você (têm prioridade)
+# fotos SÓ ILUSTRATIVAS dos nomes do Estúdio de imagens que a IA não conhece (ícones sem texto de outros bots).
+# Nunca são usadas para procurar nada na tela: imagem de outro idioma/jogo faria o bot errar o clique.
+EXAMPLE_DIR = os.path.join(DATA_DIR, "exemplos")
+
+
+def example(name):
+    """Foto de exemplo de um nome do Estúdio de imagens (só para você saber do que se trata), ou None."""
+    p = os.path.join(EXAMPLE_DIR, name + ".png")
+    return p if os.path.isfile(p) else None
 
 # (classe do modelo, nome em português, confiança padrão)
 GROUPS = [

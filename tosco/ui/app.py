@@ -863,7 +863,7 @@ class MainWindow(QMainWindow):
         f8.addWidget(self.f8_size)
         right.lay.addLayout(f8)
         right.lay.addWidget(muted("● imagem sua   ◉ a IA já reconhece sozinha (miniatura = como é no jogo)   "
-                                  "◐ acha pelo texto (OCR)   ○ falta capturar"))
+                                  "◐ acha pelo texto (OCR)   ◇ só exemplo (capture a sua)   ○ falta capturar"))
         lay.addWidget(right, 3)
         self._fill_templates()
         return w
@@ -1156,14 +1156,16 @@ class MainWindow(QMainWindow):
             if q and q not in (name + desc + owner + pt).lower():
                 continue
             n = self.engine.vision.count(name)
-            # ● imagem sua · ◉ a IA reconhece sozinha · ◐ acha pelo texto · ○ falta capturar
+            ex = catalog.example(name)
+            # ● imagem sua · ◉ a IA reconhece sozinha · ◐ acha pelo texto · ◇ só exemplo · ○ falta capturar
             mark, col = (("●", T.LIME) if n else ("◉", T.CYAN) if cls and self.engine.yolo.available()
-                         else ("◐", T.CYAN) if auto else ("○", T.MUTED))
+                         else ("◐", T.CYAN) if auto else ("◇", T.AMBER) if ex else ("○", T.MUTED))
             it = QListWidgetItem(f"{mark}  {pt or desc or name}" + (f"  ×{n}" if n > 1 else "")
                                  + (f"\n      {name}" if (pt or desc) else ""))
-            thumb = catalog.thumb(cls) if cls else None
-            if thumb:
-                it.setIcon(QIcon(thumb))
+            own = self.engine.vision.files(name)
+            icon = own[0] if own else (catalog.thumb(cls) if cls else None) or ex
+            if icon:
+                it.setIcon(QIcon(icon))
             it.setData(Qt.UserRole, name)
             it.setToolTip(f"{owner}: {desc}" + (f"\nIA: {pt}" if pt else ""))
             it.setForeground(QColor(col))
@@ -1195,16 +1197,20 @@ class MainWindow(QMainWindow):
         desc, owner, auto = next(((d, o, a) for n, d, o, a in self._studio_names() if n == name),
                                  ("", "Meus", False))
         cls = catalog.target_class(name)
+        ex = catalog.example(name)
         ia = (f"\n◉ A IA já reconhece isto sozinha: {catalog.label(cls)} — capturar é opcional" if cls else "")
+        exm = ("\n◇ A foto abaixo é só EXEMPLO (de outro bot) para você saber o que é — o bot não usa. "
+               "Capture a sua do seu jogo." if ex and not cls and not self.engine.vision.has(name) else "")
         self.tpl_info.setText(f"{name}\n{desc} · {owner}" + ("\n(acha pelo texto; capturar é opcional)" if auto else "")
-                              + ia)
+                              + ia + exm)
         self.save_target.setText(f"3 · SALVAR EM:  {name}")
         img = self.engine.vision.load(name)
         thumb = catalog.thumb(cls) if cls else None
         if img is not None:
             self.tpl_thumb.setPixmap(bgr_to_pixmap(img).scaled(330, 76, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        elif thumb:  # sem imagem sua: mostra como é no jogo (miniatura da IA) para você saber do que se trata
-            self.tpl_thumb.setPixmap(QPixmap(thumb).scaled(330, 76, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        elif thumb or ex:  # sem imagem sua: mostra como é (foto da IA ou exemplo) para você saber do que se trata
+            self.tpl_thumb.setPixmap(QPixmap(thumb or ex).scaled(330, 76, Qt.KeepAspectRatio,
+                                                                 Qt.SmoothTransformation))
         else:
             self.tpl_thumb.clear()
             self.tpl_thumb.setText("sem imagem")
