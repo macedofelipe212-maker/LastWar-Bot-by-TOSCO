@@ -8,6 +8,7 @@ from .paths import DATA_DIR
 from .targets import YOLO_TARGETS
 
 THUMB_DIR = os.path.join(DATA_DIR, "miniaturas")
+MY_THUMB_DIR = os.path.join(DATA_DIR, "miniaturas_minhas")  # fotos trocadas por você (têm prioridade)
 
 # (classe do modelo, nome em português, confiança padrão)
 GROUPS = [
@@ -179,10 +180,39 @@ def threshold(cls, cfg, fixed=None):
     return default(cls, cfg)
 
 
+def _fname(cls):
+    return cls.replace(" ", "_") + ".png"
+
+
 def thumb(cls):
-    """Caminho da miniatura da classe (ou None)."""
-    p = os.path.join(THUMB_DIR, cls.replace(" ", "_") + ".png")
+    """Caminho da miniatura da classe: a sua (se trocou) ou a original; None se não houver."""
+    for d in (MY_THUMB_DIR, THUMB_DIR):
+        p = os.path.join(d, _fname(cls))
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def is_mine(cls):
+    return os.path.isfile(os.path.join(MY_THUMB_DIR, _fname(cls)))
+
+
+def original_thumb(cls):
+    p = os.path.join(THUMB_DIR, _fname(cls))
     return p if os.path.isfile(p) else None
+
+
+def save_my_thumb(cls, bgr):
+    """Troca a foto de exemplo pela sua (recorte do seu jogo ou arquivo). Só ilustra: a IA não usa a foto."""
+    import cv2
+    os.makedirs(MY_THUMB_DIR, exist_ok=True)
+    cv2.imencode(".png", bgr)[1].tofile(os.path.join(MY_THUMB_DIR, _fname(cls)))
+
+
+def reset_my_thumb(cls):
+    p = os.path.join(MY_THUMB_DIR, _fname(cls))
+    if os.path.isfile(p):
+        os.remove(p)
 
 
 def target_class(name):

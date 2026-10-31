@@ -1,10 +1,12 @@
 """Estúdio visual (IA): o que a IA do TOSCO reconhece no jogo, com miniatura e nome em português de cada coisa,
 agrupado por assunto, e a confiança de cada uma num controle deslizante (como o painel do LWFarmBot).
 O botão "O QUE A IA VÊ AGORA" tira um print do jogo e marca, em cada cartão e na imagem, o que foi achado."""
-from PySide6.QtCore import QRectF, Qt
+import cv2
+import numpy as np
+from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget)
 
 from ..core import catalog
 from . import theme as T
@@ -30,6 +32,106 @@ def _muted(text):
     return lab
 
 
+SLIDER_HELP = ("Confiança: o quanto a IA precisa ter certeza antes do bot usar isto.\n"
+               "← Menor: aceita mesmo em dúvida. Use se o bot NÃO acha isto na tela (cartão laranja, 'fraco').\n"
+               "→ Maior: só aceita com muita certeza. Use se o bot clica no lugar ERRADO.\n"
+               "Não mexe na foto — a foto é só exemplo de como isto aparece no jogo.")
+
+
+class ClickLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+
+def _big(pix, w=360, h=240):
+    return pix.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation) if not pix.isNull() else pix
+
+
+class ItemDialog(QDialog):
+    """Clique na miniatura: foto ampliada + como está no seu jogo agora + trocar a foto."""
+
+    def __init__(self, card):
+        super().__init__(card)
+        self.card, self.page, cls = card, card.page, card.cls
+        self.setWindowTitle(card.name)
+        self.setMinimumWidth(820)
+        self.setStyleSheet(f"QDialog {{ background:{T.PANEL}; }}")
+        v = QVBoxLayout(self)
+        h = QLabel(card.name)
+        h.setStyleSheet("font-size:18px;font-weight:800")
+        v.addWidget(h)
+        v.addWidget(_muted(f"Classe da IA: {cls} · confiança atual {card.current():.2f} "
+                           f"(padrão {catalog.default(cls, self.page.cfg):.2f})"))
+        row = QHBoxLayout()
+        self.ex = self._panel(row, "FOTO DE EXEMPLO" + ("  (sua)" if catalog.is_mine(cls) else "  (original)"))
+        p = catalog.thumb(cls)
+        if p:
+            self.ex.setPixmap(_big(QPixmap(p)))
+        else:
+            self.ex.setText("sem foto")
+        self.live = self._panel(row, "NO SEU JOGO AGORA (último ⟳)")
+        self.crop = self.page.crop_of(cls)
+        if self.crop is not None:
+            self.live.setPixmap(_big(bgr_to_pixmap(self.crop)))
+        else:
+            self.live.setText("A IA não viu isto no último print.\n\nAbra no jogo a tela onde isto aparece\n"
+                              "e clique em  ⟳ O QUE A IA VÊ AGORA.")
+        v.addLayout(row)
+        help_ = _muted(SLIDER_HELP)
+        help_.setWordWrap(True)
+        v.addWidget(help_)
+        bar = QHBoxLayout()
+        b = _btn("📷 Usar o recorte do meu jogo como foto", "go", self._use_live,
+                 "Troca a foto de exemplo pelo que a IA achou no seu jogo agora")
+        b.setEnabled(self.crop is not None)
+        bar.addWidget(b)
+        bar.addWidget(_btn("📂 Trocar por arquivo…", None, self._from_file, "Escolhe um PNG/JPG do seu PC"))
+        r = _btn("↺ Voltar à original", None, self._reset)
+        r.setEnabled(catalog.is_mine(cls) and catalog.original_thumb(cls) is not None)
+        bar.addWidget(r)
+        bar.addStretch()
+        bar.addWidget(_btn("Fechar", None, self.accept))
+        v.addLayout(bar)
+
+    def _panel(self, row, title):
+        box = QVBoxLayout()
+        t = QLabel(title)
+        t.setObjectName("h")
+        box.addWidget(t)
+        lab = QLabel()
+        lab.setAlignment(Qt.AlignCenter)
+        lab.setFixedSize(380, 260)
+        lab.setStyleSheet(f"background:#04070e;border:1px solid {T.LINE};color:{T.MUTED}")
+        box.addWidget(lab)
+        row.addLayout(box)
+        return lab
+
+    def _done(self):
+        self.card.reload_thumb()
+        self.accept()
+
+    def _use_live(self):
+        catalog.save_my_thumb(self.card.cls, self.crop)
+        self._done()
+
+    def _from_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Escolher foto", "", "Imagens (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not path:
+            return
+        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is not None:
+            catalog.save_my_thumb(self.card.cls, img)
+            self._done()
+
+    def _reset(self):
+        catalog.reset_my_thumb(self.card.cls)
+        self._done()
+
+
 class ItemCard(QFrame):
     """Um tipo de coisa que a IA reconhece: miniatura, nome, se foi visto agora, confiança e padrão."""
 
@@ -43,15 +145,13 @@ class ItemCard(QFrame):
         v.setSpacing(4)
         top = QHBoxLayout()
         top.setSpacing(8)
-        self.thumb = QLabel()
+        self.thumb = ClickLabel()
         self.thumb.setFixedSize(40, 40)
         self.thumb.setAlignment(Qt.AlignCenter)
-        self.thumb.setStyleSheet(f"background:#04070e;border:1px solid {T.LINE};border-radius:3px")
-        p = catalog.thumb(cls)
-        if p:
-            self.thumb.setPixmap(QPixmap(p).scaled(38, 38, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            self.thumb.setText("?")
+        self.thumb.setCursor(Qt.PointingHandCursor)
+        self.thumb.setToolTip("Clique para ampliar e trocar a foto")
+        self.thumb.clicked.connect(lambda: ItemDialog(self).exec())
+        self.reload_thumb()
         top.addWidget(self.thumb)
         col = QVBoxLayout()
         col.setSpacing(1)
@@ -69,6 +169,7 @@ class ItemCard(QFrame):
         row = QHBoxLayout()
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(10, 95)
+        self.slider.setToolTip(SLIDER_HELP)
         self.slider.valueChanged.connect(self._changed)
         row.addWidget(self.slider, 1)
         self.default = _muted("")
@@ -77,6 +178,16 @@ class ItemCard(QFrame):
         row.addWidget(self.reset)
         v.addLayout(row)
         self.refresh()
+
+    def reload_thumb(self):
+        p = catalog.thumb(self.cls)
+        mine = catalog.is_mine(self.cls)
+        self.thumb.setStyleSheet(f"background:#04070e;border:1px solid {T.LIME if mine else T.LINE};"
+                                 f"border-radius:3px")
+        if p:
+            self.thumb.setPixmap(QPixmap(p).scaled(38, 38, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            self.thumb.setText("?")
 
     def current(self):
         return catalog.threshold(self.cls, self.page.cfg, catalog.FIXED.get(self.cls))
@@ -185,10 +296,13 @@ class VisionPage(QWidget):
         bar.addWidget(self.count)
         bar.addWidget(_btn("Redefinir tudo", "ghost", self.reset_all, "Apaga todos os seus ajustes de confiança"))
         left.addLayout(bar)
-        left.addWidget(_muted(
+        intro = _muted(
             "Cada cartão é uma coisa do jogo que a IA reconhece sozinha — você não precisa capturar nada. "
-            "A confiança (0,10–0,95) é o quanto ela precisa ter certeza: abaixe se o bot não acha algo que está na "
-            "tela; aumente se ele clica no lugar errado. Laranja = valor mudado por você."))
+            "Clique na FOTO para ampliar e trocar (a foto é só exemplo; a IA não depende dela). "
+            "A BARRINHA é a confiança: ← para a esquerda se o bot não acha isto na tela; → para a direita se ele "
+            "clica no lugar errado. Número laranja = valor mudado por você · borda verde na foto = foto sua.")
+        intro.setWordWrap(True)
+        left.addWidget(intro)
 
         self.cards, self.sections = [], []
         holder = QWidget()
@@ -212,7 +326,10 @@ class VisionPage(QWidget):
         lay.addLayout(left, 3)
 
         right = Card("O que a IA viu")
-        self.preview = QLabel("Clique em  ⟳ O QUE A IA VÊ AGORA\ncom o jogo aberto")
+        self.preview = ClickLabel("Clique em  ⟳ O QUE A IA VÊ AGORA\ncom o jogo aberto")
+        self.preview.setCursor(Qt.PointingHandCursor)
+        self.preview.setToolTip("Clique para ver o print grande")
+        self.preview.clicked.connect(self._zoom_preview)
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumSize(360, 220)
         self.preview.setStyleSheet(f"background:#04070e;border:1px dashed {T.LINE};color:{T.MUTED}")
@@ -298,6 +415,17 @@ class VisionPage(QWidget):
         self._draw()
         self._filter()
 
+    def crop_of(self, cls):
+        """Recorte do último print onde a IA viu esta classe (a melhor caixa), ou None."""
+        img, det = self._last_img, getattr(self, "_last_det", None) or {}
+        if img is None or not det.get(cls):
+            return None
+        x, y, _sc, bw, bh = det[cls][0]
+        mx, my = int(bw * 0.15) + 4, int(bh * 0.15) + 4
+        H, W = img.shape[:2]
+        c = img[max(0, y - bh // 2 - my):min(H, y + bh // 2 + my), max(0, x - bw // 2 - mx):min(W, x + bw // 2 + mx)]
+        return c.copy() if c.size else None
+
     def _draw(self):
         img, det = self._last_img, self._last_det
         pix = bgr_to_pixmap(img)
@@ -323,6 +451,18 @@ class VisionPage(QWidget):
         p.end()
         self._pix = pix
         self._fit()
+
+    def _zoom_preview(self):
+        if getattr(self, "_pix", None) is None:
+            return
+        d = QDialog(self)
+        d.setWindowTitle("O que a IA viu")
+        scr = QApplication.primaryScreen().availableGeometry()
+        lab = QLabel()
+        lab.setPixmap(self._pix.scaled(int(scr.width() * 0.9), int(scr.height() * 0.85), Qt.KeepAspectRatio,
+                                       Qt.SmoothTransformation))
+        QVBoxLayout(d).addWidget(lab)
+        d.exec()
 
     def _fit(self):
         if getattr(self, "_pix", None) is not None:

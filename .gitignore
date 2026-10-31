@@ -22,3 +22,6 @@ tesseract/
 
 # conectores MCP desta máquina
 .mcp.json
+
+# fotos de exemplo trocadas por você no Estúdio visual
+data/miniaturas_minhas/
