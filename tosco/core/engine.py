@@ -597,6 +597,21 @@ class Context:
                 if self.tap(name, 0.8, after=1.5):
                     break
             sc = self.on_main()
+        if not sc:
+            # truque da Loja (piggy-lastwar-bot): sem Base/Mundo mas com o ícone da Loja na HUD, abrir a Loja e
+            # sair dela sempre volta à tela principal. Só abre e sai — nada é tocado dentro da Loja.
+            mall = self.seen("Mall", 0.6)
+            if mall:
+                self.log("↺ Recuperação: abrindo e fechando a Loja para voltar à tela principal")
+                self.tap_xy(mall[0], mall[1], spread=2, guard=False)
+                self.sleep(1.8)
+                for _ in range(3):
+                    if self.on_main():
+                        break
+                    if not self.tap("btn_back", 1.0, after=0.8) and not self.tap("btn_close", 0.8, after=0.8):
+                        self.key("esc")
+                        self.sleep(0.8)
+                sc = self.on_main()
         if sc:
             self.e.recover_streak = 0
         elif self.e.recover_streak >= 4:

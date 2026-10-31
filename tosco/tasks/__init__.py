@@ -161,7 +161,10 @@ class AutoDigs(Task):
             return False
         ctx.tap_xy(*hit, spread=2)
         ctx.sleep(1.2)
-        proof = bool(ctx.seen("reward_message", 0.4) or ctx.seen("share_popup", 0.4))
+        f = ctx.frame()
+        proof = bool(ctx.seen("reward_message", 0.4, f) or ctx.seen("share_popup", 0.4, f))
+        if proof and ctx.cfg["telegram"].get("notify_digs"):
+            ctx.e.telegram.send_photo(f, "⛏ Recompensa da escavação")  # o print do que veio, no celular
         for _ in range(4):  # tela de recompensa: fecha pelo X; sem X, toque embaixo
             if ctx.on_main():
                 break
@@ -208,6 +211,7 @@ class AutoDigs(Task):
                 for _ in range(int(s["max_taps"])):
                     if ctx.ai("gift_reward"):
                         ctx.tap("gift_reward", 1)
+                        ctx.tap("btn_like", 1.2, after=0.4)  # curtir quem deu o presente (como o piggy-lastwar-bot)
                         ctx.counters.add("eggs")
                         done += 1
                         ctx.log("◒ Presente/ovo da aliança coletado")
@@ -259,7 +263,14 @@ class AutoDigs(Task):
                     return None
                 ctx.tap_xy(link[0][0], link[0][1], spread=2)
                 hit = ctx.ai_wait("dig_logo", 8)
-                return hit[:2] if hit else None
+                if hit:
+                    return hit[:2]
+                # o link sempre centraliza o mapa na escavação: sem achar o logo, o ponto certo é o centro da tela
+                if ctx.on_main() == "world":
+                    f = ctx.frame(fresh=False)
+                    ctx.log("⛏ Logo não reconhecido — usando o centro da tela (o mapa centraliza na escavação)")
+                    return f.shape[1] // 2, f.shape[0] // 2
+                return None
             ctx.sleep(0.4, human=False)
         return None
 
@@ -325,6 +336,11 @@ class AutoDigs(Task):
             f = ctx.frame()
             if self._claim(ctx, s):
                 return True
+            if ctx.seen("Treasure gone", 0.6, f):  # outro pegou o presente antes: não adianta esperar
+                ctx.log("⛏ O tesouro já foi pego por outro — encerrando esta escavação")
+                self._st = None
+                ctx.go_home()
+                return False
             if ctx.ai("squad_1", f) and ctx.ai("btn_march", f):  # a equipe não saiu: marcha de novo
                 march(ctx, parse_list(s.get("squad_order", "")) or SQUADS)
                 continue
@@ -759,6 +775,7 @@ class AutoJoin(Task):
     fields = [Field("any_boss", "Entrar em QUALQUER rally (ignora a lista de chefes)", "bool", False)] + \
              [Field(f"boss_{k}", n, "bool", k in ("gold", "marshal")) for k, n in RALLY_BOSSES] + [
         Field("daily_limit", "Limite de entradas/dia por chefe (0 = ∞)", "int", 0, minimum=0, maximum=999),
+        Field("max_level", "Nível máximo do chefe (0 = qualquer)", "int", 0, minimum=0, maximum=999),
         Field("squad_order", "Ordem de esquadrões", "text", "3,2,4,1"),
         Field("heal_after", "Curar a cada N entradas (0 = nunca)", "int", 10, minimum=0, maximum=100),
         Field("delay_before", "Espera antes de entrar (s, parece humano)", "float", 0.0, minimum=0, maximum=30),
@@ -773,6 +790,9 @@ class AutoJoin(Task):
         ("Durante as entradas", [
             Card("Limite diário", "⏳", "Máximo de entradas por dia em cada chefe.", fields=["daily_limit"],
                  summary=lambda s: f"no máximo {s['daily_limit']} por dia" if int(s["daily_limit"]) else "sem limite"),
+            Card("Nível máximo", "▲", "Entra no rally de MAIOR nível até este limite (lido na tela).",
+                 fields=["max_level"],
+                 summary=lambda s: f"até Nv.{s['max_level']}" if int(s.get("max_level", 0) or 0) else "qualquer nível"),
             Card("Esquadrões", "⚑", "Ordem de preferência dos esquadrões que entram.", fields=["squad_order"],
                  summary="ordem {squad_order}"),
             Card("Curar tropas", "✚", "Cura os feridos a cada algumas entradas.", fields=["heal_after"],
@@ -803,18 +823,21 @@ class AutoJoin(Task):
         return bool(ctx.step("aba Guerra", lambda: ctx.tap("tab_alliance_war", 2, after=1.2), "alliance_war", 3))
 
     def _boss_at(self, ctx, slot, s):
-        """Chefe da linha do '+' lendo o nome (OCR) à esquerda dele: chave de RALLY_BOSSES ou None."""
+        """Chefe da linha do '+' lendo o texto (OCR) à esquerda dele: (chave de RALLY_BOSSES, nível ou 0) ou
+        (None, 0). O nível vem de "Nv. 26" / "Lv.26"."""
         if not ctx.ocr_on():
-            return None
+            return None, 0
         f = ctx.frame(fresh=False)
         h, w = f.shape[:2]
         x, y = slot
         region = (max(0.0, x / w - 0.45), max(0.0, y / h - 0.07), min(0.45, x / w), 0.14)
         t = norm(ctx.ocr.text(f, region))
+        m = re.search(r"\b(?:nv|lv|nivel)\s*(\d{1,3})\b", t)
+        lvl = int(m.group(1)) if m else 0
         for k, keys in RALLY_BOSS_TEXT.items():
             if any(kw in t for kw in keys):
-                return k
-        return None
+                return k, lvl
+        return None, lvl
 
     def run(self, ctx, s):
         if not ctx.knows("btn_join_rally"):
@@ -847,15 +870,20 @@ class AutoJoin(Task):
                         if row:
                             target, label, key = row[0], name, k
                             break
-                if not target:  # sem imagem do chefe: lê o nome na linha de cada vaga
+                if not target:  # sem imagem do chefe: lê nome e nível na linha de cada vaga
+                    top, cands = int(s.get("max_level", 0) or 0), []
                     for slot in slots:
-                        k = self._boss_at(ctx, slot, s)
+                        k, lvl = self._boss_at(ctx, slot, s)
                         if not k or not s.get(f"boss_{k}"):
                             continue
                         if int(s["daily_limit"]) and ctx.counters.get(f"join_{k}") >= int(s["daily_limit"]):
                             continue
-                        target, label, key = slot, names[k], k
-                        break
+                        if top and lvl > top:
+                            continue  # forte demais para as tropas
+                        cands.append((lvl, slot, k))
+                    if cands:  # o de maior nível que ainda cabe no limite rende mais
+                        lvl, target, key = max(cands, key=lambda c: c[0])
+                        label = names[key] + (f" Nv.{lvl}" if lvl else "")
             if not target:
                 break
             if float(s["delay_before"]):
