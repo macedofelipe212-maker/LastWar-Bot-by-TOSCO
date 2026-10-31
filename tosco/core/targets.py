@@ -91,7 +91,9 @@ YOLO_TARGETS = {
     "gift_popup_btn": ["treasure_gift_popup_btn"], "gift_reward": ["treasure_gift_popup_reward"],
     "fire_alert": ["fire_alert"], "fire_claim": ["fire_alert_claim"],
     # rally / combate
-    "rally_alert": ["rally_alert_icon"], "btn_join_rally": ["rally_add_btn"], "rally_card": ["rally_card"],
+    # rally_alert com limiar próprio: um elemento vermelho qualquer a 0,5 abria a lista de rallies à toa a cada
+    # meio minuto; o alerta de verdade vem a ~0,9. (O limiar de find()/exists() é de TEMPLATE, outra escala.)
+    "rally_alert": [("rally_alert_icon", 0.6)], "btn_join_rally": ["rally_add_btn"], "rally_card": ["rally_card"],
     "btn_rally": ["rally_btn", "Rally Button"], "btn_attack": ["attack_btn"], "btn_battle": ["fight_btn"],
     "btn_challenge": ["challenge_btn"], "btn_heal": ["heal_btn"], "btn_hospital": ["Hospital"],
     # outros

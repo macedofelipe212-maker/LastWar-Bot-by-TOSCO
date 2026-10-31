@@ -1245,7 +1245,7 @@ class MainWindow(QMainWindow):
             main = self.engine.vision.path(name)
             if os.path.exists(main):
                 self.engine.vision.delete_file(main)
-        fname = self.engine.vision.save(name, crop, self.canvas.src.shape[1], v)
+        fname = self.engine.vision.save(name, crop, self.canvas.src.shape[1], v, source_height=self.canvas.src.shape[0])
         self._fill_templates()
         self._tpl_selected(self.tpl_list.currentItem())
         self._studio_msg(f"✔ Salvo: data\\templates\\{fname}.png ({crop.shape[1]}×{crop.shape[0]} px)")
@@ -1257,7 +1257,7 @@ class MainWindow(QMainWindow):
             return
         crop = self.canvas.crop()
         if crop is not None:
-            self.engine.vision.save(name, crop, self.canvas.src.shape[1])
+            self.engine.vision.save(name, crop, self.canvas.src.shape[1], source_height=self.canvas.src.shape[0])
             self._studio_msg(f"✔ Nome '{name}' criado com o recorte atual")
         else:
             self._studio_msg(f"Nome '{name}' criado — recorte algo e clique em SALVAR (ou importe imagens)")
@@ -1371,7 +1371,7 @@ class MainWindow(QMainWindow):
             return
         crop = img[max(0, cy - half):cy + half, max(0, cx - half):cx + half].copy()
         v = self.engine.vision.next_variant(name)
-        fname = self.engine.vision.save(name, crop, img.shape[1], v)
+        fname = self.engine.vision.save(name, crop, img.shape[1], v, source_height=img.shape[0])
         self.engine.log(f"▣ Captura rápida: '{fname}'")
         self.canvas.set_frame(img)
         self._fill_templates()

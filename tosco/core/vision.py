@@ -50,12 +50,14 @@ class Vision:
     def available(self):
         return sorted({os.path.basename(f)[:-4].split("@")[0] for f in glob.glob(os.path.join(TEMPLATE_DIR, "*.png"))})
 
-    def save(self, name, bgr, source_width, variant=None):
-        """Salva o template (ou uma variante extra) e lembra a largura da janela de origem."""
+    def save(self, name, bgr, source_width, variant=None, source_height=None):
+        """Salva o template (ou uma variante extra) e lembra o tamanho da janela de origem. A altura é o que
+        importa: o jogo escala a interface pela ALTURA da janela (a largura extra só afasta os cantos)."""
         fname = f"{name}@{variant}" if variant else name
         cv2.imencode(".png", bgr)[1].tofile(os.path.join(TEMPLATE_DIR, fname + ".png"))
         with self._lock:
-            self._widths[fname] = int(source_width)
+            self._widths[fname] = ({"w": int(source_width), "h": int(source_height)} if source_height
+                                   else int(source_width))
             self._write_meta()
             self._cache.pop(fname, None)
         return fname
@@ -98,7 +100,23 @@ class Vision:
         return img
 
     def source_width(self, key):
-        return self._widths.get(key, BASE_WIDTH)
+        v = self._widths.get(key, BASE_WIDTH)
+        return v["w"] if isinstance(v, dict) else v
+
+    def source_height(self, key):
+        """Altura da janela de origem, ou None nos templates antigos (que só guardavam a largura)."""
+        v = self._widths.get(key)
+        return v.get("h") if isinstance(v, dict) else None
+
+    def _bases(self, key, frame_w, frame_h):
+        """Escala(s) do template para este frame. O jogo escala a interface pela ALTURA da janela, então com a
+        altura de origem é exata. Template antigo (só largura): tenta pela largura e pela altura supondo que a
+        origem era 16:9 — numa janela larga (ex.: 2309x973) só a largura erraria ~33% e nada casaria."""
+        sh = self.source_height(key)
+        if sh:
+            return {frame_h / sh}
+        sw = self.source_width(key)
+        return {frame_w / sw, frame_h / (sw * 9 / 16)}
 
     # --- busca ----------------------------------------------------------
     def find_all(self, frame, name, threshold=0.85, region=None, max_hits=20, gray=None, color_tol=45):
@@ -108,7 +126,7 @@ class Vision:
         fs = self.files(name)
         if not fs:
             return []
-        full_w = frame.shape[1]
+        full_h, full_w = frame.shape[:2]
         ox = oy = 0
         if gray is None:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -124,8 +142,8 @@ class Vision:
             if tgray is None:
                 continue
             tcol = cv2.mean(timg)[:3]
-            base = full_w / self.source_width(key)
-            for s in sorted({round(base, 3)} | {round(base * k, 3) for k in (0.92, 1.08)}):
+            bases = self._bases(key, full_w, full_h)
+            for s in sorted({round(b * k, 3) for b in bases for k in (0.92, 1.0, 1.08)}):
                 t = tgray if abs(s - 1.0) < 1e-3 else cv2.resize(tgray, None, fx=s, fy=s,
                                                                  interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
                 th, tw = t.shape[:2]

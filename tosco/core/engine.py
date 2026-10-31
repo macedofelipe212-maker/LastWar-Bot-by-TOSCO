@@ -31,6 +31,9 @@ class TaskTimeout(Exception):
 
 # Alvos que vivem na faixa do chat (ou logo acima dela): não são filtrados na tela principal
 CHAT_BAND_OK = ("btn_chat", "gift_alert", "dig_alert", "fire_alert", "btn_to_world", "btn_to_base")
+# Abas do chat aberto (ficam no topo do painel); a caixa de digitar (chat_input) não entra: ela fica embaixo
+# e é sinal confiável de chat aberto
+CHAT_TABS = ("chat_ally", "chat_world", "chat_moment", "chat_private")
 
 
 class Field:
@@ -202,7 +205,7 @@ class Context:
         if not self.ai_on(name):
             return []
         frame = self.frame(fresh=False) if frame is None else frame
-        det = self.e.yolo.detect(frame, self.cfg.get("ai_model", "rapido"))
+        det = self.e.yolo.detect(frame, self.cfg.get("ai_model", "preciso"))
         base = float(self.cfg.get("ai_threshold", 0.5))
         fh, fw = frame.shape[:2]
         out = []
@@ -280,7 +283,7 @@ class Context:
         x0, y0 = max(0, x0), max(0, y0)
         crop = frame[y0:y1, x0:x1].copy()
         if crop.shape[0] >= 10 and crop.shape[1] >= 10:
-            self.vision.save(name, crop, frame.shape[1])
+            self.vision.save(name, crop, frame.shape[1], source_height=frame.shape[0])
             self.log(f"▣ Aprendi o botão '{name}' sozinho pelo texto")
 
     def find_text(self, keywords, region=None):
@@ -510,10 +513,18 @@ class Context:
     # --- navegação ------------------------------------------------------
     def on_main(self, frame=None):
         """Na tela principal (base ou mapa) SEM nada aberto por cima. 'base' / 'world' / None."""
-        d = self.dets(frame)
+        f = self.frame(fresh=False) if frame is None else frame
+        d = self.dets(f)
         if not d:
             return None
-        if any(c in d for c in OVERLAY_CLASSES):
+        for c in OVERLAY_CLASSES:
+            hits = d.get(c)
+            if not hits:
+                continue
+            # a prévia do chat na faixa de baixo da tela principal pode ser lida como uma aba do chat; as abas de
+            # verdade ficam no TOPO do painel aberto. Aba só conta se alguma detecção estiver fora da faixa.
+            if c in CHAT_TABS and all(screens.in_chat_band(h[0], h[1], f.shape) for h in hits):
+                continue
             return None
         if "World" in d:  # botão Mundo visível = estamos na base
             return "base"
