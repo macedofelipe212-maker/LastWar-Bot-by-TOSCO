@@ -13,7 +13,7 @@ import random
 import re
 import time
 
-from ..core import tesseract
+from ..core import rapid, tesseract
 from ..core.engine import Card, Field, Task
 from ..core.ocr import norm
 from ..core.paths import REPORT_DIR
@@ -130,12 +130,17 @@ class AutoDigs(Task):
 
     # --- peças ---------------------------------------------------------
     def _timer(self, ctx):
-        """Cronômetro do popup: Tesseract na caixa `timer_text` (com margem); senão na aba inteira, só tokens com
-        ':'; por último o OCR do Windows. O OCR do Windows sozinho não lê a fonte do jogo."""
+        """Cronômetro do popup na caixa `timer_text`: RapidOCR no recorte justo (~11 ms) → Tesseract com margem;
+        senão na aba inteira, só tokens com ':'; por último o OCR do Windows (que sozinho não lê a fonte do jogo)."""
         f = ctx.frame(fresh=False)
         box = ctx.ai("dig_timer", f)
         if box:
             x, y, _, w, h = box[0]
+            v = rapid.read_timer_box(f, (x, y, w, h))
+            if v == rapid.INVALID:
+                return None  # relógio lido com certeza mas fora do limite: o Tesseract só "consertaria" para errado
+            if v is not None:
+                return v
             mx, my = int(w * 0.25) + 4, int(h * 0.35) + 4
             crop = f[max(0, y - h // 2 - my):y + h // 2 + my, max(0, x - w // 2 - mx):x + w // 2 + mx]
             v = tesseract.read_timer(crop)
@@ -145,7 +150,11 @@ class AutoDigs(Task):
         if tab:
             x, y, _, w, h = tab[0]
             crop = f[max(0, y - h // 2):y + h // 2, max(0, x - w // 2):x + w // 2]
-            v = tesseract.read_timer_in_text(crop)
+            v = rapid.read_timer_in_text(crop)
+            if v == rapid.INVALID:
+                return None
+            if v is None:
+                v = tesseract.read_timer_in_text(crop)
             if v is not None:
                 return v
         if box and ctx.ocr_on():

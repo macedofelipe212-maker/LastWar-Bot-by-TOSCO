@@ -242,8 +242,11 @@ class MainWindow(QMainWindow):
         if self.cfg.data.get("ai_enabled", True):
             ai = (f"ativa ({len(yolo.names)} tipos de botão)" if yolo._load(self.cfg.data.get("ai_model", "rapido"))
                   else yolo.error or "indisponível")
+        from ..core import rapid, tesseract
+        # installed() não carrega nada: carregar o RapidOCR aqui travaria a janela; o motor aquece ao iniciar
+        nums = "RapidOCR" if rapid.installed() else ("Tesseract" if tesseract.available() else "OCR do Windows")
         self.engine.log(f"{APP} online · OCR: " + (f"ativo ({ocr.language})" if ocr.enabled else "indisponível") +
-                        f" · IA: {ai} · plataforma: {self.engine.backend.name.upper()}")
+                        f" · números/cronômetros: {nums} · IA: {ai} · plataforma: {self.engine.backend.name.upper()}")
         if cfg.data["ui"].get("autostart_engine"):
             QTimer.singleShot(3000, self.engine.start)
 

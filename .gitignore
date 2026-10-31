@@ -19,3 +19,6 @@ docs/
 
 # Tesseract copiado ao lado do exe
 tesseract/
+
+# conectores MCP desta máquina
+.mcp.json

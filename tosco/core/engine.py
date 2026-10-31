@@ -7,7 +7,7 @@ import threading
 import time
 import traceback
 
-from . import screens, winapi
+from . import rapid, screens, winapi
 from .backends import make_backend
 from .config import Counters
 from .ocr import OCR, norm
@@ -987,6 +987,9 @@ class Engine:
             self.backend.prepare(self.log)
         except Exception as ex:
             self.log(f"preparação: {ex}", "warn")
+        # aquece o RapidOCR aqui (1–2 s, fora da janela e fora da escavação); falha vira aviso, não silêncio
+        if rapid.installed() and not rapid.available():
+            self.log(f"RapidOCR indisponível ({rapid.error}) — cronômetros pelo Tesseract/OCR do Windows", "warn")
         last_status = time.time()
         try:
             while not self.stop_flag.is_set():
