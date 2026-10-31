@@ -1,0 +1,21 @@
+# gerados pelo build.bat
+build/
+dist/
+TOSCO.spec
+tosco.png
+tosco.ico
+__pycache__/
+*.pyc
+
+# dados pessoais de cada usuário (token do Telegram, contadores, logs, relatórios)
+data/settings.json
+data/contadores_diarios.json
+data/logs/
+data/relatorios/
+data/*.csv
+
+# análises dos bots concorrentes ficam só no PC (não publicar)
+docs/
+
+# Tesseract copiado ao lado do exe
+tesseract/
