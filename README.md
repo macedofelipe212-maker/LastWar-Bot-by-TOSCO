@@ -1,4 +1,4 @@
-# TOSCO // Last War Ops
+# TOSCO // BOT Last War Ops
 
 Bot para Last War: Survival escrito do zero, com interface HUD futurista.
 Roda no jogo oficial de PC ou em emulador Android (ADB, em segundo plano).
@@ -15,8 +15,7 @@ Roda no jogo oficial de PC ou em emulador Android (ADB, em segundo plano).
 
 Ordem de busca de cada botão: **sua imagem capturada → IA → texto (OCR)**.
 
-- **IA de reconhecimento** (`data\modelos\lw_rapido.onnx` e `lw_preciso.onnx`, modelo do LWFarmBot usado com
-  autorização do autor): reconhece ~295 botões e ícones (Base/Mundo, chat, escavações, cronômetro, presente,
+- **IA de reconhecimento** (`data\modelos\lw_rapido.onnx` e `lw_preciso.onnx`, reconhece ~295 botões e ícones (Base/Mundo, chat, escavações, cronômetro, presente,
   rally, '+' de vaga, esquadrões, marchar, X de fechar…) em qualquer resolução e idioma, sem capturar nada.
   Liga/desliga e escolhe rápido/preciso em SISTEMA › Visão. Sem a pasta `modelos`, o TOSCO segue sem IA.
 - **Cronômetros e números** (escavação, vigor, níveis): lidos pelo **Tesseract** (o OCR do Windows não lê a fonte
