@@ -12,5 +12,6 @@ TEMPLATE_DIR = os.path.join(DATA_DIR, "templates")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 REPORT_DIR = os.path.join(DATA_DIR, "relatorios")
 MODEL_DIR = os.path.join(DATA_DIR, "modelos")
-for _d in (DATA_DIR, TEMPLATE_DIR, LOG_DIR, REPORT_DIR, MODEL_DIR):
+PRINT_DIR = os.path.join(DATA_DIR, "prints")  # prints do jogo salvos pelo Estúdio (para recortar depois)
+for _d in (DATA_DIR, TEMPLATE_DIR, LOG_DIR, REPORT_DIR, MODEL_DIR, PRINT_DIR):
     os.makedirs(_d, exist_ok=True)

@@ -219,7 +219,8 @@ class CaptureCanvas(QLabel):
         super().__init__()
         self.setMinimumSize(480, 270)
         self.setAlignment(Qt.AlignCenter)
-        self.setText("Sem captura — clique em CAPTURAR JOGO")
+        self.setText("Sem imagem — clique em CAPTURAR JOGO ou ABRIR IMAGEM\n"
+                     "Depois arraste o mouse sobre o botão/ícone para recortar")
         self.setStyleSheet(f"background:#04070e;border:1px dashed {T.LINE};color:{T.MUTED}")
         self.src = None
         self._a = self._b = None
@@ -248,18 +249,39 @@ class CaptureCanvas(QLabel):
             self.update()
 
     def mouseMoveEvent(self, e):
-        if self._a is not None:
+        if self._a is not None and e.buttons():
             self._b = self._to_src(e.position())
             self.update()
+            self.selected.emit(self.selection())
 
     def mouseReleaseEvent(self, e):
         if self._a is not None:
             self.selected.emit(self.selection())
 
     def selection(self):
-        if self._a is None or self._b is None:
+        """Retângulo selecionado em pixels da imagem (largura/altura exatas, sem o +1 do QRect por pontos)."""
+        if self._a is None or self._b is None or self.src is None:
             return QRect()
-        return QRect(self._a.toPoint(), self._b.toPoint()).normalized()
+        x0, x1 = sorted((int(self._a.x()), int(self._b.x())))
+        y0, y1 = sorted((int(self._a.y()), int(self._b.y())))
+        return QRect(x0, y0, x1 - x0, y1 - y0)
+
+    def set_selection(self, x, y, w, h):
+        """Ajuste fino pelos números (X, Y, largura, altura)."""
+        if self.src is None:
+            return
+        H, W = self.src.shape[:2]
+        x, y = max(0, min(x, W - 1)), max(0, min(y, H - 1))
+        w, h = max(1, min(w, W - x)), max(1, min(h, H - y))
+        self._a, self._b = QPointF(x, y), QPointF(x + w, y + h)
+        self.update()
+
+    def crop(self):
+        """Recorte selecionado (BGR) ou None."""
+        sel = self.selection()
+        if self.src is None or sel.width() < 6 or sel.height() < 6:
+            return None
+        return self.src[sel.y():sel.y() + sel.height(), sel.x():sel.x() + sel.width()].copy()
 
     def paintEvent(self, e):
         if self.src is None:

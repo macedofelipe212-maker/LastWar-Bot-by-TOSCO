@@ -5,8 +5,10 @@ import subprocess
 import sys
 import time
 
-from PySide6.QtCore import QObject, Qt, QTime, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QTextCharFormat
+import cv2
+import numpy as np
+from PySide6.QtCore import QObject, QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QTextCharFormat
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -16,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from ..core import winapi
 from ..core.backends import ADBBackend, find_adb
 from ..core.engine import DAYS, AutoClicker, Engine
-from ..core.paths import DATA_DIR, REPORT_DIR, ROOT
+from ..core.paths import DATA_DIR, PRINT_DIR, REPORT_DIR, ROOT, TEMPLATE_DIR
 from ..core.scanner import CAT_ICONS, CAT_NAMES, CATEGORIES, describe_pos
 from ..tasks import ALL_TASKS, all_templates
 from . import theme as T
@@ -752,21 +754,75 @@ class MainWindow(QMainWindow):
         left.setMaximumWidth(380)
         lay.addWidget(left, 1)
 
+        left.lay.addWidget(muted("Imagens salvas deste nome (clique para ver; apague a errada):"))
+        self.tpl_variants = QListWidget()
+        self.tpl_variants.setViewMode(QListWidget.IconMode)
+        self.tpl_variants.setIconSize(QSize(64, 64))
+        self.tpl_variants.setFixedHeight(96)
+        self.tpl_variants.setMovement(QListWidget.Static)
+        left.lay.addWidget(self.tpl_variants)
+        vb = QHBoxLayout()
+        vb.addWidget(button("🗑 apagar esta", "ghost", self._studio_delete_variant, "Apaga só a imagem selecionada acima"))
+        vb.addWidget(button("🗑 todas", "ghost", self._studio_delete, "Apaga todas as imagens deste nome"))
+        vb.addWidget(button("📁 pasta", "ghost", lambda: self._open_dir(TEMPLATE_DIR), "Abre data\\templates"))
+        left.lay.addLayout(vb)
+        left.lay.addWidget(button("✚ NOVO NOME…", None, self._studio_new_name,
+                                  "Cria um nome seu (ex.: para usar em 'toque <nome>' nas Rotinas)"))
+
         right = Card("Recorte")
+        # 1 · imagem de onde recortar
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("1 · IMAGEM"))
+        r1.addWidget(button("⟳ CAPTURAR JOGO", "accent", self._studio_capture, "Tira um print do jogo agora"))
+        r1.addWidget(button("📷 SALVAR PRINT", None, self._studio_save_print,
+                            "Guarda o print atual em data\\prints para recortar depois"))
+        r1.addWidget(button("📂 ABRIR IMAGEM…", None, self._studio_open_image,
+                            "Abre um print salvo (PNG/JPG) para recortar"))
+        r1.addWidget(button("📁 prints", "ghost", lambda: self._open_dir(PRINT_DIR), "Abre data\\prints"))
+        r1.addStretch()
+        right.lay.addLayout(r1)
+        self.canvas = CaptureCanvas()
+        self.canvas.selected.connect(self._studio_sel_changed)
+        right.lay.addWidget(self.canvas, 1)
+        # 2 · recorte: arrastar na imagem ou ajustar os números
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("2 · RECORTE"))
+        self.sel_spins = []
+        for lab in ("X", "Y", "L", "A"):
+            sp = QSpinBox(minimum=0, maximum=9999)
+            sp.setPrefix(lab + " ")
+            sp.valueChanged.connect(self._studio_spins_changed)
+            self.sel_spins.append(sp)
+            r2.addWidget(sp)
+        self.sel_preview = QLabel("—")
+        self.sel_preview.setFixedSize(150, 64)
+        self.sel_preview.setAlignment(Qt.AlignCenter)
+        self.sel_preview.setStyleSheet(f"background:#04070e;border:1px solid {T.LINE}")
+        r2.addWidget(self.sel_preview)
+        r2.addStretch()
+        right.lay.addLayout(r2)
+        # 3 · salvar no nome escolhido na lista
+        r3 = QHBoxLayout()
+        self.save_target = QLabel("3 · SALVAR EM: (escolha um nome na lista)")
+        r3.addWidget(self.save_target, 1)
+        r3.addWidget(button("✔ SALVAR", "go", lambda: self._studio_save(False), "Substitui a imagem principal"))
+        r3.addWidget(button("+ VARIANTE", None, lambda: self._studio_save(True),
+                             "Guarda mais uma versão (outro idioma, tema, tamanho) sem apagar as outras"))
+        r3.addWidget(button("⬆ IMPORTAR IMAGENS…", None, self._studio_import,
+                            "Adiciona imagens já recortadas (PNG/JPG) ao nome escolhido ou como nomes novos"))
+        right.lay.addLayout(r3)
+        # 4 · testar
         bar = QHBoxLayout()
-        bar.addWidget(button("⟳ CAPTURAR JOGO", "accent", self._studio_capture))
-        bar.addWidget(button("✔ SALVAR", "go", lambda: self._studio_save(False)))
-        bar.addWidget(button("+ VARIANTE", None, lambda: self._studio_save(True),
-                             "Outra versão do mesmo elemento (outro idioma, tema, tamanho)"))
-        bar.addWidget(button("◎ TESTAR", None, self._studio_test))
-        bar.addWidget(button("🗑", "ghost", self._studio_delete, "Apagar imagens deste template"))
-        bar.addStretch()
+        bar.addWidget(QLabel("4 · TESTAR"))
+        bar.addWidget(button("◎ TESTAR NA IMAGEM", None, self._studio_test, "Procura o nome escolhido na imagem acima"))
         self.th = QDoubleSpinBox(decimals=2, minimum=0.5, maximum=0.99, singleStep=0.01, value=0.85)
         bar.addWidget(muted("limiar"))
         bar.addWidget(self.th)
+        bar.addStretch()
         right.lay.addLayout(bar)
-        self.canvas = CaptureCanvas()
-        right.lay.addWidget(self.canvas, 1)
+        self.studio_status = QLabel("")
+        self.studio_status.setStyleSheet(f"color:{T.LIME}")
+        right.lay.addWidget(self.studio_status)
         f8 = QHBoxLayout()
         self.f8_size = QSpinBox(minimum=16, maximum=400, value=60, suffix=" px")
         f8.addWidget(muted(f"Captura rápida: escolha o nome na lista, ponha o mouse sobre o elemento no jogo e aperte "
@@ -1059,7 +1115,7 @@ class MainWindow(QMainWindow):
         cur = self.tpl_list.currentItem().data(Qt.UserRole) if self.tpl_list.currentItem() else None
         q = self.tpl_filter.text().lower().strip()
         self.tpl_list.clear()
-        for name, desc, owner, auto in all_templates():
+        for name, desc, owner, auto in self._studio_names():
             if q and q not in (name + desc + owner).lower():
                 continue
             n = self.engine.vision.count(name)
@@ -1072,18 +1128,47 @@ class MainWindow(QMainWindow):
             if name == cur:
                 self.tpl_list.setCurrentItem(it)
 
+    def _studio_names(self):
+        """Nomes do TOSCO + nomes criados por você (imagens na pasta que não são de nenhuma tarefa)."""
+        out = list(all_templates())
+        known = {n for n, *_ in out}
+        mine = set(self.engine.vision.available()) | getattr(self, "_extra_names", set())
+        out += [(n, "Nome criado por você", "Meus", False) for n in sorted(mine) if n not in known]
+        return out
+
+    def _studio_msg(self, text, ok=True):
+        self.studio_status.setStyleSheet(f"color:{T.LIME if ok else T.AMBER}")
+        self.studio_status.setText(text)
+        self.engine.log(text, "info" if ok else "warn")
+
+    def _open_dir(self, path):
+        os.makedirs(path, exist_ok=True)
+        os.startfile(path)
+
     def _tpl_selected(self, it, _=None):
         if not it:
             return
         name = it.data(Qt.UserRole)
-        desc, owner, auto = next((d, o, a) for n, d, o, a in all_templates() if n == name)
+        desc, owner, auto = next(((d, o, a) for n, d, o, a in self._studio_names() if n == name),
+                                 ("", "Meus", False))
         self.tpl_info.setText(f"{name}\n{desc} · {owner}" + ("\n(acha pelo texto; capturar é opcional)" if auto else ""))
+        self.save_target.setText(f"3 · SALVAR EM:  {name}")
         img = self.engine.vision.load(name)
         if img is not None:
             self.tpl_thumb.setPixmap(bgr_to_pixmap(img).scaled(330, 76, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self.tpl_thumb.clear()
             self.tpl_thumb.setText("sem imagem")
+        self.tpl_variants.clear()
+        for p in self.engine.vision.files(name):
+            im = self.engine.vision._load_file(p)
+            if im is None:
+                continue
+            vi = QListWidgetItem(QIcon(bgr_to_pixmap(im)), os.path.basename(p)[:-4].replace(name, "") or "principal")
+            vi.setData(Qt.UserRole, p)
+            vi.setToolTip(f"{os.path.basename(p)} · {im.shape[1]}×{im.shape[0]} px · "
+                          f"tela de origem {self.engine.vision.file_width(p)} px")
+            self.tpl_variants.addItem(vi)
 
     def _studio_capture(self):
         img = self.engine.capture()
@@ -1091,26 +1176,147 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP, self.engine.backend.describe())
             return
         self.canvas.set_frame(img)
+        self._studio_msg(f"Print do jogo capturado ({img.shape[1]}×{img.shape[0]}). Arraste sobre o elemento.")
+
+    def _studio_save_print(self):
+        if self.canvas.src is None:
+            self._studio_capture()
+        if self.canvas.src is None:
+            return
+        fname = os.path.join(PRINT_DIR, time.strftime("print_%Y-%m-%d_%H-%M-%S.png"))
+        cv2.imencode(".png", self.canvas.src)[1].tofile(fname)
+        self._studio_msg(f"📷 Print salvo: data\\prints\\{os.path.basename(fname)}")
+
+    def _studio_open_image(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Abrir imagem para recortar", PRINT_DIR,
+                                              "Imagens (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not path:
+            return
+        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            self._studio_msg(f"Não consegui abrir {os.path.basename(path)}", False)
+            return
+        self.canvas.set_frame(img)
+        self._studio_msg(f"Imagem aberta: {os.path.basename(path)} ({img.shape[1]}×{img.shape[0]}). Arraste para recortar.")
+
+    def _studio_sel_changed(self, sel):
+        for sp, v in zip(self.sel_spins, (sel.x(), sel.y(), sel.width(), sel.height())):
+            sp.blockSignals(True)
+            sp.setValue(v)
+            sp.blockSignals(False)
+        self._studio_preview()
+
+    def _studio_spins_changed(self, _=None):
+        self.canvas.set_selection(*(sp.value() for sp in self.sel_spins))
+        self._studio_preview()
+
+    def _studio_preview(self):
+        crop = self.canvas.crop()
+        if crop is None:
+            self.sel_preview.setText("—")
+            return
+        self.sel_preview.setPixmap(bgr_to_pixmap(crop).scaled(148, 62, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def _current_tpl(self):
         it = self.tpl_list.currentItem()
         return it.data(Qt.UserRole) if it else None
 
+    def _select_tpl(self, name):
+        self.tpl_filter.clear()
+        self._fill_templates()
+        for i in range(self.tpl_list.count()):
+            if self.tpl_list.item(i).data(Qt.UserRole) == name:
+                self.tpl_list.setCurrentRow(i)
+                break
+
     def _studio_save(self, variant):
-        name, sel = self._current_tpl(), self.canvas.selection()
-        if self.canvas.src is None or not name or sel.width() < 6 or sel.height() < 6:
-            QMessageBox.information(self, APP, "Capture o jogo, escolha um nome na lista e arraste uma seleção.")
+        name, crop = self._current_tpl(), self.canvas.crop()
+        if not name:
+            self._studio_msg("Escolha na lista (à esquerda) o nome onde salvar — ou crie um com ✚ NOVO NOME.", False)
             return
-        crop = self.canvas.src[sel.y():sel.y() + sel.height(), sel.x():sel.x() + sel.width()].copy()
+        if crop is None:
+            self._studio_msg("Arraste sobre a imagem para recortar (mínimo 6×6 px).", False)
+            return
         v = self.engine.vision.next_variant(name) if variant else None
         if not variant:
-            for p in self.engine.vision.files(name):
-                if os.path.basename(p)[:-4] == name:
-                    os.remove(p)
+            main = self.engine.vision.path(name)
+            if os.path.exists(main):
+                self.engine.vision.delete_file(main)
         fname = self.engine.vision.save(name, crop, self.canvas.src.shape[1], v)
-        self.engine.log(f"▣ '{fname}' salvo ({sel.width()}×{sel.height()})")
         self._fill_templates()
         self._tpl_selected(self.tpl_list.currentItem())
+        self._studio_msg(f"✔ Salvo: data\\templates\\{fname}.png ({crop.shape[1]}×{crop.shape[0]} px)")
+
+    def _studio_new_name(self):
+        name, ok = QInputDialog.getText(self, APP, "Nome novo (letras, números e _; ex.: meu_botao):")
+        name = "".join(c for c in (name or "").strip().lower().replace(" ", "_") if c.isalnum() or c == "_")
+        if not ok or not name:
+            return
+        crop = self.canvas.crop()
+        if crop is not None:
+            self.engine.vision.save(name, crop, self.canvas.src.shape[1])
+            self._studio_msg(f"✔ Nome '{name}' criado com o recorte atual")
+        else:
+            self._studio_msg(f"Nome '{name}' criado — recorte algo e clique em SALVAR (ou importe imagens)")
+        self._extra_names = getattr(self, "_extra_names", set()) | {name}
+        self._select_tpl(name)
+
+    def _studio_import(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Importar imagens já recortadas", ROOT,
+                                                "Imagens (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not paths:
+            return
+        name = self._current_tpl()
+        box = QMessageBox(self)
+        box.setWindowTitle(APP)
+        box.setText(f"{len(paths)} imagem(ns). Como adicionar?")
+        b_var = box.addButton(f"Como imagens de '{name}'", QMessageBox.AcceptRole) if name else None
+        b_new = box.addButton("Cada uma como nome novo (nome do arquivo)", QMessageBox.AcceptRole)
+        b_cut = box.addButton("Abrir para recortar", QMessageBox.ActionRole) if len(paths) == 1 else None
+        box.addButton("Cancelar", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is None or clicked.text() == "Cancelar":
+            return
+        if b_cut is not None and clicked is b_cut:
+            img = cv2.imdecode(np.fromfile(paths[0], dtype=np.uint8), cv2.IMREAD_COLOR)
+            if img is not None:
+                self.canvas.set_frame(img)
+                self._studio_msg(f"Imagem aberta: {os.path.basename(paths[0])}. Arraste para recortar.")
+            return
+        # largura da tela de onde as imagens vieram: o tamanho atual do jogo é o melhor palpite
+        src_w = self.engine.last_frame.shape[1] if self.engine.last_frame is not None else 1920
+        src_w, ok = QInputDialog.getInt(self, APP, "Largura (px) da tela do jogo de onde estes recortes saíram\n"
+                                        "(serve para reescalar; na dúvida, deixe o valor sugerido):",
+                                        src_w, 320, 7680)
+        if not ok:
+            return
+        done, last = 0, name
+        for p in paths:
+            img = cv2.imdecode(np.fromfile(p, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if img is None or min(img.shape[:2]) < 6:
+                continue
+            if b_var is not None and clicked is b_var:
+                self.engine.vision.save(name, img, src_w, self.engine.vision.next_variant(name))
+            else:
+                base = os.path.splitext(os.path.basename(p))[0].lower().replace(" ", "_").replace("@", "_")
+                last = "".join(c for c in base if c.isalnum() or c == "_") or "imagem"
+                self.engine.vision.save(last, img, src_w, self.engine.vision.next_variant(last))
+            done += 1
+        self._studio_msg(f"⬆ {done} imagem(ns) importada(s) para data\\templates")
+        self._select_tpl(last) if last else self._fill_templates()
+
+    def _studio_delete_variant(self):
+        it = self.tpl_variants.currentItem()
+        if not it:
+            self._studio_msg("Clique numa das imagens salvas (miniaturas) para apagar só ela.", False)
+            return
+        p = it.data(Qt.UserRole)
+        if QMessageBox.question(self, APP, f"Apagar {os.path.basename(p)}?") == QMessageBox.Yes:
+            self.engine.vision.delete_file(p)
+            self._fill_templates()
+            self._tpl_selected(self.tpl_list.currentItem())
+            self._studio_msg(f"🗑 {os.path.basename(p)} apagada")
 
     def _studio_delete(self):
         name = self._current_tpl()
@@ -1118,10 +1324,13 @@ class MainWindow(QMainWindow):
                 self, APP, f"Apagar as imagens de '{name}'?") == QMessageBox.Yes:
             self.engine.vision.delete(name)
             self._fill_templates()
+            self._tpl_selected(self.tpl_list.currentItem())
+            self._studio_msg(f"🗑 Imagens de '{name}' apagadas")
 
     def _studio_test(self):
         name = self._current_tpl()
         if self.canvas.src is None or not name:
+            self._studio_msg("Precisa de uma imagem (CAPTURAR JOGO/ABRIR IMAGEM) e um nome escolhido na lista.", False)
             return
         hits = self.engine.vision.find_all(self.canvas.src, name, self.th.value())
         how = "imagem"
@@ -1135,7 +1344,8 @@ class MainWindow(QMainWindow):
         self.canvas.hits = hits
         self.canvas._a = self.canvas._b = None
         self.canvas.update()
-        self.engine.log(f"◎ '{name}': {len(hits)} ocorrência(s) por {how}")
+        self._studio_msg(f"◎ '{name}': {len(hits)} ocorrência(s) por {how}" +
+                         ("" if hits else " — tente baixar o limiar ou salvar uma variante"), bool(hits))
 
     def _quick_capture(self):
         """F8: recorta um quadrado em volta do mouse direto do jogo e salva no template selecionado."""

@@ -66,9 +66,20 @@ class Vision:
 
     def delete(self, name):
         for p in self.files(name):
+            self.delete_file(p)
+
+    def delete_file(self, p):
+        """Apaga uma imagem (template ou uma variante)."""
+        key = os.path.basename(p)[:-4]
+        if os.path.exists(p):
             os.remove(p)
-            self._widths.pop(os.path.basename(p)[:-4], None)
-        self._write_meta()
+        with self._lock:
+            self._widths.pop(key, None)
+            self._cache.pop(key, None)
+            self._write_meta()
+
+    def file_width(self, p):
+        return self.source_width(os.path.basename(p)[:-4])
 
     def load(self, name):
         """Primeira imagem do template (para miniatura)."""
@@ -80,7 +91,7 @@ class Vision:
         mtime = os.path.getmtime(p)
         hit = self._cache.get(key)
         if hit and hit[0] == mtime:
-            return hit[1]
+            return hit[1][0]  # o cache guarda (cor, cinza); quem chama quer a imagem colorida
         img = cv2.imdecode(np.fromfile(p, dtype=np.uint8), cv2.IMREAD_COLOR)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img is not None else None
         self._cache[key] = (mtime, (img, gray))
