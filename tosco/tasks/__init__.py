@@ -8,10 +8,13 @@ Convenção: hud_* telas · btn_* botões · tab_* abas · chat_* chat · rally_
 """
 import csv
 import datetime as dt
+import json
 import os
 import random
 import re
 import time
+
+import numpy as np
 
 from ..core import catalog, rapid, tesseract
 from ..core.engine import DAYS, Card, Field, Task
@@ -2476,20 +2479,27 @@ class Reports(Task):
 
 class MapScanner(Task):
     id, name, icon, group = "map_scanner", "Scanner de Mapa", "◎", "Relatórios & Mapa"
-    description = "Varre o mapa em volta da sua cidade e lista caminhões, trens, missões, zumbis, recursos… " \
-                  "com a posição e botão IR (página MAPA)."
+    description = "Varre uma área do mapa (centro + raio) pulando por coordenadas pela busca do jogo e lista " \
+                  "caminhões, missões, chefes, recursos… com X/Y real e botão IR."
     max_minutes = 0  # a varredura grande pode levar horas
     default_interval = 60.0
     templates = [(f"map_{k}", f"Ícone no mapa: {n}") for k, n, _ in CATEGORIES] + \
                 [("btn_bookmark", "Estrela de favoritar na ficha do alvo"),
                  ("btn_favorites", "Botão que abre a lista de favoritos do mapa")]
-    fields = [Field("bookmark", "Favoritar no jogo ao chegar (IR seguinte vai pelos favoritos)", "bool", True),
-              Field("rows", "Linhas da varredura", "int", 3, minimum=1, maximum=30),
-              Field("cols", "Colunas da varredura", "int", 4, minimum=1, maximum=30),
-              Field("step", "Passo (fração da tela)", "float", 0.5, minimum=0.2, maximum=0.7),
-              Field("zoom_out", "Afastar zoom (giros da roda)", "int", 15, minimum=0, maximum=40),
-              Field("threshold", "Limiar de reconhecimento", "float", 0.84, minimum=0.6, maximum=0.98),
-              Field("read_labels", "Ler texto ao lado do ícone", "bool", True)]
+    fields = [Field("center", "Centro da varredura", "choice", "minha cidade",
+                    options=["minha cidade", "coordenadas abaixo"]),
+              Field("cx", "Centro X", "int", 500, minimum=0, maximum=2999),
+              Field("cy", "Centro Y", "int", 500, minimum=0, maximum=2999),
+              Field("radius", "Raio (casas)", "int", 60, minimum=10, maximum=600),
+              Field("bookmark", "Favoritar no jogo ao chegar (IR seguinte vai pelos favoritos)", "bool", False),
+              Field("rows", "Linhas (modo sem coordenadas)", "int", 3, minimum=1, maximum=30),
+              Field("cols", "Colunas (modo sem coordenadas)", "int", 4, minimum=1, maximum=30),
+              Field("step", "Passo (fração da tela, modo sem coordenadas)", "float", 0.5, minimum=0.2, maximum=0.7),
+              Field("zoom_out", "Afastar zoom: no máximo (giros; para antes da vista estratégica)", "int", 6,
+                    minimum=0, maximum=40),
+              Field("threshold", "Limiar das suas imagens map_…", "float", 0.84, minimum=0.6, maximum=0.98),
+              Field("read_labels", "Ler texto ao lado do ícone", "bool", True),
+              Field("calib", "Calibração (automática)", "text", "")]
     store = ScanStore()
 
     def defaults(self):
@@ -2497,18 +2507,216 @@ class MapScanner(Task):
         d.update({k: v for k, v in SCAN_DEFAULTS.items() if k not in d})
         return d
 
+    # O que a IA já reconhece no mapa, por categoria do scanner: o scanner funciona sem você capturar nada.
+    # (ícones capturados por você no Estúdio continuam valendo e somam com a IA)
+    AI_MAP = {"truck": ("truck_map", "Truck"), "mission": ("task_map", "Secret Task", "Secret Task Ally",
+                                                          "Secret Task non-ally"),
+              "boss": ("boss_zombie", "boss_walker", "elite_maudite", "garde_marechal"),
+              "res_food": ("Farm",), "res_iron": ("Iron Mine",), "res_gold": ("Gold Mine",)}
+
+    # --- câmera ------------------------------------------------------------
+    def _zoom_far(self, ctx, s):
+        """Afasta um dente por vez enquanto a lupa continua na tela; quando ela some (vista estratégica: missões
+        e caminhões somem do mapa) volta um dente. Resultado: a vista NORMAL mais afastada."""
+        if ctx.e.backend.name != "pc":
+            return
+        for _ in range(int(s.get("zoom_out", 6))):
+            ctx.scroll(-1, 0.5, 0.45)
+            ctx.sleep(0.6, human=False)
+            if not ctx.ai("btn_search", ctx.frame()):
+                for _ in range(3):  # volta até a lupa reaparecer
+                    ctx.scroll(1, 0.5, 0.45)
+                    ctx.sleep(0.7, human=False)
+                    if ctx.ai("btn_search", ctx.frame()):
+                        break
+                break
+
     def _home(self, ctx, s):
-        """Câmera na sua cidade e zoom no mínimo: a origem fixa de todas as posições."""
+        """Câmera na sua cidade e zoom na vista normal mais afastada."""
         ctx.to_base()
         if not ctx.to_world():
             raise RuntimeError("não consegui abrir o mapa")
         ctx.sleep(1.0)
-        if ctx.e.backend.name == "pc":
-            for _ in range(int(s["zoom_out"])):
-                ctx.scroll(-1, 0.5, 0.45)
-                ctx.sleep(0.07, human=False)
-            ctx.sleep(1.0)
+        self._zoom_far(ctx, s)
         return ctx.frame()
+
+    @staticmethod
+    def _center(f):
+        return f.shape[1] / 2, f.shape[0] / 2
+
+    def _goto(self, ctx, x, y):
+        """Lupa → campos X e Y (IA coord_input, da esquerda para a direita) → Ir. O mapa centraliza na casa."""
+        if not ctx.tap("btn_search", 2, after=1.0):
+            return False
+        boxes = sorted(ctx.ai("coord_input", ctx.frame()), key=lambda b: b[0])[:2]
+        if len(boxes) < 2:
+            ctx.press_back()
+            return False
+        for b, v in zip(boxes, (x, y)):
+            ctx.tap_xy(b[0], b[1], spread=1)
+            ctx.sleep(0.25)
+            ctx.tap_xy(b[0], b[1], spread=1)  # 2º toque: tira o foco do campo anterior
+            ctx.sleep(0.25)
+            for _ in range(5):
+                ctx.key("backspace")
+            ctx.type(str(int(v)))
+            ctx.sleep(0.2)
+        if not ctx.tap("btn_coord_go", 1.5, after=1.2):
+            ctx.key("enter")
+            ctx.sleep(1.2)
+        for _ in range(6):  # confirma que saiu da tela de busca
+            f = ctx.frame()
+            if not ctx.ai("coord_input", f):
+                ctx.sleep(0.6, human=False)  # o mapa ainda desliza um pouco
+                return True
+            ctx.sleep(0.5, human=False)
+        ctx.press_back()
+        return False
+
+    def _my_city(self, ctx):
+        """Coordenadas da sua cidade: o mapa abre centrado nela; toca no centro e lê 'X:… Y:…' da ficha."""
+        f = ctx.frame()
+        cx, cy = self._center(f)
+        ctx.tap_xy(int(cx), int(cy), spread=1)
+        ctx.sleep(1.2)
+        xy = ctx.ocr.coords(ctx.frame()) if ctx.ocr_on() else None
+        ctx.press_back()
+        ctx.sleep(0.5)
+        return xy
+
+    def _calibrate(self, ctx, s, x0, y0):
+        """Quantos pixels vale 1 casa em X e em Y nesta janela e neste zoom (pula +D casas e mede o deslocamento
+        da imagem). Guarda a matriz pixel→casa; refaz se o tamanho da janela mudar."""
+        f = ctx.frame()
+        key = f"{f.shape[1]}x{f.shape[0]}"
+        try:
+            cal = json.loads(s.get("calib") or "{}")
+        except ValueError:
+            cal = {}
+        if cal.get("key") == key and "m" in cal:
+            return np.array(cal["m"], float)
+        D = 6
+        if not self._goto(ctx, x0, y0):
+            return None
+        a = ctx.frame()
+        vecs = []
+        for dx, dy in ((D, 0), (0, D)):
+            if not self._goto(ctx, x0 + dx, y0 + dy):
+                return None
+            b = ctx.frame()
+            mx, my, resp = measure_shift(a, b)
+            if resp < 0.03 or abs(mx) + abs(my) < 4:
+                ctx.log(f"◎ Calibração falhou (deslocamento {mx:.0f},{my:.0f}, confiança {resp:.2f})", "warn")
+                return None
+            vecs.append((-mx / D, -my / D))  # a casa +D estava em -deslocamento na tela de antes
+            self._goto(ctx, x0, y0)
+            a = ctx.frame()
+        m = np.array([[vecs[0][0], vecs[1][0]], [vecs[0][1], vecs[1][1]]], float)  # casas → pixels
+        if abs(np.linalg.det(m)) < 1e-3:
+            return None
+        s["calib"] = json.dumps({"key": key, "m": m.tolist()})
+        ctx.log(f"◎ Calibrado: 1 casa X = ({vecs[0][0]:.1f}, {vecs[0][1]:.1f}) px · "
+                f"1 casa Y = ({vecs[1][0]:.1f}, {vecs[1][1]:.1f}) px")
+        return m
+
+    @staticmethod
+    def _view_tiles(m, w, h):
+        """Meia-largura (em casas) do quadrado de casas que cabe na área útil da tela (sem o HUD)."""
+        hw, hh = 0.36 * w, 0.32 * h
+        ax = abs(m[0][0]) + abs(m[0][1])
+        ay = abs(m[1][0]) + abs(m[1][1])
+        return max(2.0, min(hw / max(ax, 1e-6), hh / max(ay, 1e-6)))
+
+    @staticmethod
+    def _grid(cx, cy, radius, step, half=0.0):
+        """Centros dos pulos cobrindo o quadrado centro±raio, do meio para fora (o perto fica pronto primeiro).
+        half: meia-tela em casas — o último pulo já enxerga até a borda, sem pulo a mais."""
+        n = max(0, int(np.ceil(max(0.0, radius - half) / step)))
+        pts = [(int(round(cx + i * step)), int(round(cy + j * step)))
+               for i in range(-n, n + 1) for j in range(-n, n + 1)]
+        pts = [(x, y) for x, y in pts if 0 <= x <= 2999 and 0 <= y <= 2999]
+        return sorted(set(pts), key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
+
+    def _hits(self, ctx, f, cat, s):
+        """Detecções de uma categoria no frame: imagens suas (map_…) + IA. [(x, y, score, w, h)]"""
+        out = []
+        if ctx.vision.has(f"map_{cat}"):
+            out += ctx.vision.find_all(f, f"map_{cat}", float(s["threshold"]))
+        if ctx.ai_on():
+            d = ctx.dets(f, conf=0.2)
+            for cls in self.AI_MAP.get(cat, ()):
+                thr = catalog.threshold(cls, ctx.cfg)
+                out += [h for h in d.get(cls, []) if h[2] >= max(0.35, thr)]
+        return out
+
+    def _label(self, ctx, s, f, x, y, tw, th):
+        if not (s["read_labels"] and ctx.ocr_on()):
+            return ""
+        h, w = f.shape[:2]
+        crop = f[int(max(0, y - th)):int(min(h, y + th * 1.6)), int(max(0, x - tw * 1.5)):int(min(w, x + tw * 1.5))]
+        return " ".join(l.text for l in ctx.ocr.read(crop))[:60]
+
+    def _cats(self, ctx, s):
+        ai = ctx.ai_on()
+        return [k for k, _, _ in CATEGORIES if s["categories"].get(k, True)
+                and (ctx.vision.has(f"map_{k}") or (ai and k in self.AI_MAP))]
+
+    # --- varredura ---------------------------------------------------------
+    def run(self, ctx, s):
+        cats = self._cats(ctx, s)
+        if not cats:
+            ctx.log("◎ Nada para procurar: ligue a IA (Configurações) ou capture um ícone de mapa (map_…) "
+                    "no Estúdio de imagens", "warn")
+            return
+        ctx.log("◎ Procurando: " + ", ".join(CAT_NAMES[k] for k in cats))
+        f = self._home(ctx, s)
+        if s.get("center") == "coordenadas abaixo":
+            c = (int(s["cx"]), int(s["cy"]))
+        else:
+            c = self._my_city(ctx)
+            if c:
+                ctx.log(f"◎ Sua cidade: X:{c[0]} Y:{c[1]}")
+        m = self._calibrate(ctx, s, *c) if c else None
+        if m is None:
+            ctx.log("◎ Sem coordenadas (busca do mapa ou ficha da cidade não reconhecidas) — varrendo arrastando",
+                    "warn")
+            return self._run_drag(ctx, s, cats)
+        self._run_coords(ctx, s, cats, c, m)
+
+    def _run_coords(self, ctx, s, cats, c, m):
+        st = self.store
+        f = ctx.frame()
+        h, w = f.shape[:2]
+        inv = np.linalg.inv(m)
+        half = self._view_tiles(m, w, h)
+        pts = self._grid(c[0], c[1], int(s["radius"]), max(3, int(half * 2 * 0.9)), half)
+        ctx.log(f"◎ Área X:{c[0]}±{s['radius']} Y:{c[1]}±{s['radius']} — {len(pts)} pulos "
+                f"(cada tela ≈ {2 * half:.0f}×{2 * half:.0f} casas)")
+        st.begin_scan()
+        found = 0
+        for i, (gx, gy) in enumerate(pts, 1):
+            if not self._goto(ctx, gx, gy):
+                ctx.log(f"◎ Não consegui pular para X:{gx} Y:{gy}", "warn")
+                continue
+            f = ctx.frame()
+            x0, y0 = self._center(f)
+            for cat in cats:
+                for (x, y, score, tw, th) in self._hits(ctx, f, cat, s):
+                    if not (0.1 * w < x < 0.9 * w and 0.12 * h < y < 0.85 * h):
+                        continue  # HUD do jogo
+                    tx, ty = inv @ np.array([x - x0, y - y0])
+                    ix, iy = int(round(gx + tx)), int(round(gy + ty))
+                    if abs(ix - c[0]) > int(s["radius"]) + half or abs(iy - c[1]) > int(s["radius"]) + half:
+                        continue
+                    st.add(cat, x - x0, y - y0, w, score, self._label(ctx, s, f, x, y, tw, th),
+                           gx=ix, gy=iy, origin=c)
+                    found += 1
+            if i % 5 == 0:
+                st.save()
+                ctx.log(f"◎ {i}/{len(pts)} pulos · {len(st.items)} itens")
+        st.last_scan = time.time()
+        st.save()
+        ctx.log(f"◎ Varredura concluída: {len(st.items)} itens ({found} detecções)")
 
     @staticmethod
     def _move(ctx, prev, dx_px, dy_px):
@@ -2523,61 +2731,28 @@ class MapScanner(Task):
             return cur, dx_px, dy_px
         return cur, -mx, -my
 
-    # O que a IA já reconhece no mapa, por categoria do scanner: o scanner funciona sem você capturar nada.
-    # (ícones capturados por você no Estúdio continuam valendo e somam com a IA)
-    AI_MAP = {"truck": ("truck_map", "Truck"), "mission": ("task_map", "Secret Task", "Secret Task Ally",
-                                                          "Secret Task non-ally"),
-              "boss": ("boss_zombie", "boss_walker", "elite_maudite", "garde_marechal"),
-              "res_food": ("Farm",), "res_iron": ("Iron Mine",), "res_gold": ("Gold Mine",)}
-
-    def _hits(self, ctx, f, cat, s):
-        """Detecções de uma categoria no frame: imagens suas (map_…) + IA. [(x, y, score, w, h)]"""
-        out = []
-        if ctx.vision.has(f"map_{cat}"):
-            out += ctx.vision.find_all(f, f"map_{cat}", float(s["threshold"]))
-        if ctx.ai_on():
-            d = ctx.dets(f, conf=0.2)
-            for cls in self.AI_MAP.get(cat, ()):
-                thr = catalog.threshold(cls, ctx.cfg)
-                out += [h for h in d.get(cls, []) if h[2] >= max(0.4, thr)]
-        return out
-
-    def run(self, ctx, s):
+    def _run_drag(self, ctx, s, cats):
+        """Reserva sem coordenadas: arrasta em zigue-zague medindo o deslocamento (posições relativas à cidade)."""
         st = self.store
-        ai = ctx.ai_on()
-        cats = [k for k, _, _ in CATEGORIES if s["categories"].get(k, True)
-                and (ctx.vision.has(f"map_{k}") or (ai and k in self.AI_MAP))]
-        if not cats:
-            ctx.log("◎ Nada para procurar: ligue a IA (Configurações) ou capture um ícone de mapa (map_…) "
-                    "no Estúdio de imagens", "warn")
-            return
-        ctx.log("◎ Procurando: " + ", ".join(CAT_NAMES[k] for k in cats)
-                + ("  (pela IA" + (" + suas imagens)" if any(ctx.vision.has(f"map_{k}") for k in cats) else ")")
-                   if ai else ""))
-        f = self._home(ctx, s)
+        f = ctx.frame()
         h, w = f.shape[:2]
         rows, cols, step = int(s["rows"]), int(s["cols"]), float(s["step"])
         cam = [0.0, 0.0]
-        # começa no canto superior esquerdo da área, para a cidade ficar no meio da varredura
         f, mx, my = self._move(ctx, f, -step * w * (cols - 1) / 2, -step * h * (rows - 1) / 2)
         cam[0] += mx
         cam[1] += my
         st.begin_scan()
         found = 0
         for r in range(rows):
-            for c in range(cols):
+            for col in range(cols):
                 for cat in cats:
                     for (x, y, score, tw, th) in self._hits(ctx, f, cat, s):
                         if not (0.1 * w < x < 0.9 * w and 0.12 * h < y < 0.85 * h):
-                            continue  # HUD do jogo
-                        label = ""
-                        if s["read_labels"] and ctx.ocr_on():
-                            crop = f[int(max(0, y - th)):int(min(h, y + th * 1.6)),
-                                     int(max(0, x - tw * 1.5)):int(min(w, x + tw * 1.5))]
-                            label = " ".join(l.text for l in ctx.ocr.read(crop))[:60]
-                        st.add(cat, cam[0] + x - w / 2, cam[1] + y - h * 0.45, w, score, label)
+                            continue
+                        st.add(cat, cam[0] + x - w / 2, cam[1] + y - h * 0.45, w, score,
+                               self._label(ctx, s, f, x, y, tw, th))
                         found += 1
-                if c < cols - 1:  # zigue-zague
+                if col < cols - 1:
                     f, mx, my = self._move(ctx, f, step * w * (1 if r % 2 == 0 else -1), 0)
                     cam[0] += mx
                     cam[1] += my
@@ -2589,13 +2764,23 @@ class MapScanner(Task):
         st.save()
         ctx.log(f"◎ Varredura concluída: {len(st.items)} itens ({found} detecções)")
 
+    # --- IR -----------------------------------------------------------------
     def go(self, ctx, item, key=None):
-        """IR: pelos favoritos do jogo quando o item já foi favoritado (rápido e exato, mesmo longe);
-        senão volta para a cidade e anda medindo até ele. Ao chegar, toca no alvo, lê as coordenadas
-        reais da ficha e, se ligado, favorita no jogo para os próximos IR."""
+        """IR: com X/Y, pula direto pela busca do mapa e abre a ficha no centro. Sem X/Y (varredura antiga):
+        favoritos do jogo, ou volta para a cidade e anda medindo até ele."""
         s = ctx.e.cfg.task(self.id, self.defaults())
-        if item.get("fav") and item.get("gx") is not None and self._go_favorite(ctx, item):
-            return
+        if item.get("gx") is not None:
+            ctx.to_world()
+            if self._goto(ctx, item["gx"], item["gy"]):
+                f = ctx.frame()
+                cx, cy = self._center(f)
+                ctx.tap_xy(int(cx), int(cy), spread=1)
+                ctx.sleep(1.2)
+                ctx.log(f"◎ Cheguei em X:{item['gx']} Y:{item['gy']}")
+                self._after_arrival(ctx, s, item, key)
+                return
+            if item.get("fav") and self._go_favorite(ctx, item):
+                return
         f = self._home(ctx, s)
         w, h = f.shape[1], f.shape[0]
         k = w / max(1, item.get("w", w))  # item escaneado com outra largura de janela
@@ -2615,12 +2800,13 @@ class MapScanner(Task):
         raise RuntimeError("não consegui chegar no alvo")
 
     def _after_arrival(self, ctx, s, item, key):
-        """Com a ficha do alvo aberta: guarda X:Y reais (OCR) e favorita no jogo (estrela da ficha)."""
+        """Com a ficha do alvo aberta: confere X:Y reais (OCR) e favorita no jogo (estrela da ficha)."""
         changed = False
         xy = ctx.ocr.coords(ctx.frame(), (0.0, 0.0, 1.0, 0.86)) if ctx.ocr_on() else None
         if xy and 0 <= xy[0] < 3000 and 0 <= xy[1] < 3000:  # grade do servidor: 1000×1000 (3000 na temporada)
-            item["gx"], item["gy"] = xy
-            changed = True
+            if (item.get("gx"), item.get("gy")) != tuple(xy):
+                item["gx"], item["gy"] = xy
+                changed = True
             ctx.log(f"◎ Coordenadas do alvo: X:{xy[0]} Y:{xy[1]}")
         if s.get("bookmark") and not item.get("fav") and ctx.vision.has("btn_bookmark"):
             if ctx.tap("btn_bookmark", 1.5, after=0.8):
@@ -2646,7 +2832,7 @@ class MapScanner(Task):
                     tx, ty = go[0].center if go else ln.center
                     ctx.tap_xy(tx, ty, spread=2)
                     ctx.sleep(2.0)
-                    ctx.tap_rel(0.5, 0.45)  # o jogo centraliza no favorito: abre a ficha do alvo
+                    ctx.tap_rel(0.5, 0.5)  # o jogo centraliza no favorito: abre a ficha do alvo
                     ctx.log(f"★ Indo pelos favoritos: X:{gx} Y:{gy}")
                     return True
             ctx.drag_rel(0.5, 0.75, 0.5, 0.35, 0.6)

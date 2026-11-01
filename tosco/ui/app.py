@@ -600,8 +600,20 @@ class MainWindow(QMainWindow):
         top = Card("Varredura")
         bar = QHBoxLayout()
         bar.addWidget(button("◎ ESCANEAR AGORA", "go", lambda: self.engine.run_now("map_scanner")))
-        bar.addWidget(muted("Varre em volta da sua cidade. Posições em 'telas' a partir dela; IR volta à cidade e "
-                            "anda medindo até o alvo. Ajuste linhas/colunas em MÓDULOS › Scanner de Mapa."), 1)
+        ms = self.cfg.task(SCANNER.id, SCANNER.defaults())
+        cen = QComboBox()
+        cen.addItems(["minha cidade", "coordenadas abaixo"])
+        cen.setCurrentText(ms.get("center", "minha cidade"))
+        cen.currentTextChanged.connect(lambda v: (ms.__setitem__("center", v), self.save_soon()))
+        bar.addWidget(muted("Centro"))
+        bar.addWidget(cen)
+        for key, label, hi in (("cx", "X", 2999), ("cy", "Y", 2999), ("radius", "Raio", 600)):
+            sb = QSpinBox(minimum=0 if key != "radius" else 10, maximum=hi, value=int(ms.get(key, 0)))
+            sb.valueChanged.connect(lambda v, key=key: (ms.__setitem__(key, v), self.save_soon()))
+            bar.addWidget(muted(label))
+            bar.addWidget(sb)
+        bar.addWidget(muted("Pula por coordenadas pela lupa do jogo e grava o X/Y real de cada item; o IR vai "
+                            "direto pela busca. Sem coordenadas, varre arrastando."), 1)
         bar.addWidget(button("Restaurar ocultos", "ghost", lambda: (SCANNER.store.restore_hidden(),
                                                                      self._fill_map(True))))
         bar.addWidget(button("Limpar", "ghost", lambda: (SCANNER.store.clear(), self._fill_map(True))))

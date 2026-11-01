@@ -77,20 +77,33 @@ class ScanStore:
         with self._lock:  # mantém fixados e favoritados no jogo; o resto é refeito
             self.items = {k: v for k, v in self.items.items() if k in self.pinned or v.get("fav")}
 
-    def add(self, cat, px, py, frame_w, score, label=""):
-        """px, py: posição na tela em relação à cidade, no zoom mínimo, medida em pixels."""
+    def add(self, cat, px, py, frame_w, score, label="", gx=None, gy=None, origin=None):
+        """gx, gy: casa real do mapa (varredura por coordenadas; distância em casas a partir de origin).
+        Sem elas: px, py = posição na tela em relação à cidade, medida em pixels (varredura arrastando)."""
         with self._lock:
             tol = max(18, frame_w * 0.02)
             for k, v in self.items.items():
-                if v["cat"] == cat and abs(v["px"] - px) <= tol and abs(v["py"] - py) <= tol:
+                if v["cat"] != cat:
+                    continue
+                if gx is not None and v.get("gx") is not None:
+                    same = abs(v["gx"] - gx) <= 2 and abs(v["gy"] - gy) <= 2
+                else:
+                    same = gx is None and abs(v["px"] - px) <= tol and abs(v["py"] - py) <= tol
+                if same:
                     v["seen"] = time.time()
                     if label and not v.get("label"):
                         v["label"] = label
                     return k
-            k = f"{cat}:{int(px)}:{int(py)}"
+            if gx is not None:
+                k = f"{cat}:{gx}:{gy}"
+                dist = float(np.hypot(gx - origin[0], gy - origin[1])) if origin else 0.0
+            else:
+                k = f"{cat}:{int(px)}:{int(py)}"
+                dist = float(np.hypot(px, py)) / max(1, frame_w)
             self.items[k] = {"cat": cat, "px": int(px), "py": int(py), "w": int(frame_w), "score": round(score, 2),
-                             "label": label, "seen": time.time(),
-                             "dist": round(float(np.hypot(px, py)) / max(1, frame_w), 2)}
+                             "label": label, "seen": time.time(), "dist": round(dist, 2)}
+            if gx is not None:
+                self.items[k].update({"gx": int(gx), "gy": int(gy)})
             self.version += 1
             return k
 
