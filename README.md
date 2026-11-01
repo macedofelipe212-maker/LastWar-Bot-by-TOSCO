@@ -1,4 +1,4 @@
-# TOSCO // BOT Last War Ops
+# TOSCO // BOT Last War: Survival Game
 
 Bot para **Last War: Survival** escrito do zero em Python, com interface em português no estilo HUD.
 Roda no **jogo oficial de PC** ou em **emulador Android** (BlueStacks, MuMu, LDPlayer… via ADB, em segundo plano).

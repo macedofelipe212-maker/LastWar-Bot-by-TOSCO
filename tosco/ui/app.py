@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
 
         self.icon, _ = make_icon()
         self.setWindowIcon(self.icon)
-        self.setWindowTitle(f"{APP} // Last War Ops")
+        self.setWindowTitle(f"{APP} // Last War: Survival Game")
         self.setMinimumSize(900, 600)
         scr = QGuiApplication.primaryScreen().availableGeometry()
         self.resize(min(1440, int(scr.width() * 0.9)), min(900, int(scr.height() * 0.9)))
@@ -276,9 +276,10 @@ class MainWindow(QMainWindow):
         self.logo = QLabel(APP)
         self.logo.setObjectName("logo")
         self.logo.setStyleSheet("padding:0;font-size:18px")
-        self.logo_sub = QLabel("LAST WAR · OPS")
+        self.logo_sub = QLabel("LAST WAR: SURVIVAL GAME")
         self.logo_sub.setObjectName("logoSub")
-        self.logo_sub.setStyleSheet("padding:0")
+        self.logo_sub.setWordWrap(True)
+        self.logo_sub.setStyleSheet("padding:0;letter-spacing:2px")  # nome é mais longo: menos espaçamento p/ caber
         col.addWidget(self.logo)
         col.addWidget(self.logo_sub)
         head.addLayout(col, 1)
@@ -309,7 +310,7 @@ class MainWindow(QMainWindow):
                 self.nav_secs.append(s)
                 lay.addWidget(s)
             for key, icon, name, _ in items:
-                b = QPushButton(f"{icon}   {name}")
+                b = QPushButton(f"{icon}   {name}".replace("&", "&&"))  # && = '&' literal (senão vira atalho)
                 b.setObjectName("nav")
                 b.setCheckable(True)
                 b.setCursor(Qt.PointingHandCursor)
@@ -420,7 +421,8 @@ class MainWindow(QMainWindow):
         for b, icon, name, key in self.nav_btns:
             star = key == f"t:{main}"
             b.setProperty("main", star)
-            b.setText(icon if self.side.width() < 100 else f"{icon}   {name}" + ("   ★" if star else ""))
+            txt = icon if self.side.width() < 100 else f"{icon}   {name}" + ("   ★" if star else "")
+            b.setText(txt.replace("&", "&&"))
         for p in self.task_pages:
             p.refresh_banner()
 
