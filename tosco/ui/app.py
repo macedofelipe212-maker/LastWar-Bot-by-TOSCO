@@ -119,9 +119,9 @@ ADVANCED_TASKS = ["routine_1", "routine_2", "routine_3", "map_scanner"]
 NAV = [
     (None, [("dash", "◉", "Painel", "Radar, contadores do dia, visão ao vivo do jogo e fila de módulos.")]),
     ("TAREFA PRINCIPAL (SÓ UMA)", [
-        ("t:auto_digs", "⛏", "Escavação Automática", "Espera no chat da aliança e pega escavações, ovos e festas."),
-        ("t:hunt", "☣", "Zumbis Dourados", "Caça zumbis e chefes com a energia que você escolher."),
-        ("t:auto_join", "⚔", "Mobilizações Automáticas", "Entra nos rallies dos chefes que você escolher."),
+        ("t:auto_digs", "⛏", "Escavações & Ovos", "Espera no chat da aliança e pega escavações, ovos e festas."),
+        ("t:hunt", "☣", "Zumbis Dourados & Rally", "Caça zumbis e chefes com a energia que você escolher."),
+        ("t:auto_join", "⚔", "Auto-Entrar em Rallies", "Entra nos rallies dos chefes que você escolher."),
     ]),
     ("TAREFAS EXTRAS (ÀS VEZES)", [
         ("daily", "✉", "Tarefas Diárias", "Pequenas tarefas que entram entre as rodadas do foco do bot."),
@@ -339,21 +339,24 @@ class MainWindow(QMainWindow):
         lay.setSpacing(8)
         # foco = a tarefa que roda sem parar; fica antes do INICIAR porque é escolhida antes de ligar
         self.main_combo = QComboBox()
-        self.main_combo.addItem("🎯 Foco: nenhum (só extras)", "")
+        self.main_combo.addItem("🎯 Sem foco (só extras)", "")
         for t in ALL_TASKS:
             if t.main_capable:
-                self.main_combo.addItem(f"🎯 Foco: {t.name}", t.id)
+                self.main_combo.addItem(f"🎯 {t.name}", t.id)
         self.main_combo.setCurrentIndex(max(0, self.main_combo.findData(self.cfg.data.get("main_task", ""))))
         self.main_combo.currentIndexChanged.connect(self._set_main)
-        self.main_combo.setMinimumWidth(250)
+        self.main_combo.setMinimumWidth(220)
         self.main_combo.setToolTip("Foco do bot: a tarefa que ele faz SEM PARAR enquanto está ligado.\n"
                                    "As outras tarefas ligadas são extras: entram só nos intervalos de cada uma\n"
                                    "e depois o bot volta para o foco. 'Nenhum' = só as extras, nos intervalos.")
         lay.addWidget(self.main_combo)
-        self.b_start = button(tr("btn.start") + " (Alt+S)", "go", self.engine.start)
+        self.b_start = button(tr("btn.start"), "go", self.engine.start)
+        self.b_start.setToolTip("Atalho: Alt+S")
         lay.addWidget(self.b_start)
-        self.b_pause = button(tr("btn.pause") + " (Alt+P)", "warn", self._pause_resume)
+        self.b_pause = button(tr("btn.pause"), "warn", self._pause_resume)
+        self.b_pause.setToolTip("Pausar: Alt+P · Retomar: Alt+R")
         self.b_stop = button(tr("btn.stop"), "danger", self.engine.stop)
+        self.b_stop.setToolTip("Atalho: Alt+Q")
         lay.addWidget(self.b_pause)
         lay.addWidget(self.b_stop)
         # liga/desliga na hora a pausa quando você mexe no mouse/teclado (também em Configurações)
@@ -366,7 +369,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.b_userpause)
         # liga/desliga uma janelinha que mostra ao vivo o que a IA está vendo
         self.live = None
-        self.b_live = QPushButton("👁 Ver o que a IA vê: DESLIGADO")
+        self.b_live = QPushButton("👁 Ver o que a IA vê")
         self.b_live.setObjectName("chip")
         self.b_live.setCheckable(True)
         self.b_live.setToolTip("Abre uma janela por cima de tudo que se atualiza sozinha a cada segundo com o que a\n"
@@ -377,13 +380,13 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
         self.pill = QLabel()
         self.pill.setFixedHeight(30)
-        self.pill.setMaximumWidth(360)
+        self.pill.setMaximumWidth(240)
         lay.addWidget(self.pill)
         return bar
 
     def _toggle_userpause(self, on, log=True):
         self.cfg.data["pause_on_user"] = bool(on)
-        self.b_userpause.setText("✋ Pausar se eu mexer: LIGADO" if on else "✋ Pausar se eu mexer: DESLIGADO")
+        self.b_userpause.setText("✋ Pausar se eu mexer")  # aceso = ligado (estado pela cor)
         self.b_userpause.setToolTip(
             "LIGADO: quando você mexe no mouse/teclado, o TOSCO solta o controle e volta após uns segundos parado.\n"
             "DESLIGADO: o TOSCO continua mesmo com você no PC (o mouse é o mesmo: vocês dois vão disputar).")
@@ -392,7 +395,7 @@ class MainWindow(QMainWindow):
             self.engine.log("✋ Pausa quando você mexe: " + ("ligada" if on else "DESLIGADA — o bot não espera você"))
 
     def _toggle_live(self, on):
-        self.b_live.setText("👁 Ver o que a IA vê: LIGADO" if on else "👁 Ver o que a IA vê: DESLIGADO")
+        # o estado (aceso = ligado) aparece pela cor do botão; o texto fica fixo
         if on and self.live is None:
             self.live = LiveVision(self, on_close=lambda: self.b_live.setChecked(False))
             self.live.show()
@@ -410,7 +413,7 @@ class MainWindow(QMainWindow):
         self.cfg.data["main_task"] = self.main_combo.currentData()
         self.save_soon()
         self._mark_main()
-        self.engine.log(f"🎯 Foco do bot: {self.main_combo.currentText().split(': ', 1)[1]}")
+        self.engine.log(f"🎯 Foco do bot: {self.main_combo.currentText().replace('🎯 ', '')}")
 
     def _mark_main(self):
         main = self.cfg.data.get("main_task")
@@ -1723,7 +1726,7 @@ class MainWindow(QMainWindow):
         self.radar.set_state(st, cur, tr("state." + st))
         self.b_start.setEnabled(not self.engine.running)
         self.b_pause.setEnabled(self.engine.running)
-        self.b_pause.setText((tr("btn.resume") + " (Alt+R)") if self.engine.paused else (tr("btn.pause") + " (Alt+P)"))
+        self.b_pause.setText(tr("btn.resume") if self.engine.paused else tr("btn.pause"))
         self.b_stop.setEnabled(self.engine.running)
         self.tray.setToolTip(f"{APP} · {tr('state.' + st)}")
 
