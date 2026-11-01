@@ -67,6 +67,34 @@ def march(ctx, squads, weak_ok=False):
     return sent("auto") if ctx.tap("btn_march", 2) else None
 
 
+def _hm(text):
+    try:
+        h, m = str(text).strip().split(":")
+        return int(h) * 60 + int(m)
+    except ValueError:
+        return None
+
+
+def _clock_in(a, b, now=None):
+    """Agora está entre a e b ('HH:MM', pode virar a meia-noite)? Campo vazio = sempre."""
+    lo, hi = _hm(a), _hm(b)
+    if lo is None or hi is None:
+        return True
+    now = now or dt.datetime.now()
+    t = now.hour * 60 + now.minute
+    return lo <= t <= hi if lo <= hi else (t >= lo or t <= hi)
+
+
+def _in_windows(text, now=None):
+    """'02:00-07:00, 13:00-14:00' → agora está em alguma janela?"""
+    for part in re.split(r"[,;]", str(text or "")):
+        if "-" in part:
+            a, b = part.split("-", 1)
+            if _hm(a) is not None and _hm(b) is not None and _clock_in(a, b, now):
+                return True
+    return False
+
+
 # ---------------------------------------------------------------- escavações e diárias
 class AutoDigs(Task):
     id, name, icon, group = "auto_digs", "Escavações & Ovos", "⛏", "Escavações & Diárias"
@@ -91,6 +119,23 @@ class AutoDigs(Task):
         Field("message_limit_min", "Mín. entre mensagens (min)", "int", 5, minimum=0, maximum=600),
         Field("squad_order", "Ordem de esquadrões", "text", "1,2,3,4"),
         Field("spam_threshold", "Começar os toques rápidos faltando (s)", "int", 13, minimum=1, maximum=120),
+        Field("spam_threshold_max", "…até (s; sorteio a cada escavação, 0 = sem sorteio)", "int", 0, minimum=0,
+              maximum=120),
+        Field("late_windows", "Toque atrasado nestes horários (ex.: 02:00-07:00, 13:00-14:00)", "text", ""),
+        Field("late_wait_s", "…esperar depois do fim do cronômetro (s)", "int", 3, minimum=0, maximum=120),
+        Field("take_fireworks", "Pegar fogos de artifício", "bool", True),
+        Field("gift_wait_min", "Esperar antes de abrir presente/ovo da sorte — de (s)", "float", 3.0, minimum=0,
+              maximum=30),
+        Field("gift_wait_max", "…até (s)", "float", 4.0, minimum=0, maximum=30),
+        Field("skip_take_min", "Pular algumas: pegar de", "int", 0, minimum=0, maximum=50,
+              hint="0 = desligado (usa a % de pular aleatório)"),
+        Field("skip_take_max", "…até", "int", 0, minimum=0, maximum=50),
+        Field("skip_skip_min", "…depois pular de", "int", 1, minimum=1, maximum=20),
+        Field("skip_skip_max", "…até", "int", 1, minimum=1, maximum=20),
+        Field("never_skip_drone", "Nunca pular escavações de drone", "bool", True),
+        Field("messages_gift", "Mensagens depois de ovo/presente (vazio = as mesmas)", "text", ""),
+        Field("msg_from", "Mensagens só a partir de (HH:MM)", "text", "08:00"),
+        Field("msg_to", "…até (HH:MM)", "text", "22:00"),
         Field("spam_duration", "Tocar rápido por no máximo (s)", "int", 120, minimum=5, maximum=600),
         Field("max_wait_min", "Desistir da escavação depois de (min)", "int", 60, minimum=1, maximum=240),
         Field("chat_scan_min", "Sem alerta: olhar o chat a cada (min, 0 = nunca)", "int", 3, minimum=0, maximum=120),
@@ -103,25 +148,43 @@ class AutoDigs(Task):
                  summary="esquadrões {squad_order} · desiste após {max_wait_min} min"),
             Card("Ovos", "◒", "Ovos compartilhados no chat: toques rápidos para o top 20.", toggle="take_eggs",
                  summary=lambda s: "pega os ovos" if s["take_eggs"] else "ignora ovos"),
-            Card("Festas e fogos", "✺", "Festas e fogos de artifício da aliança.", toggle="take_parties",
+            Card("Festas", "✺", "Escavações de festa (Corrida de Rua, Halloween, Natal…).", toggle="take_parties",
                  summary=lambda s: "pega festas" if s["take_parties"] else "ignora festas"),
+            Card("Fogos de artifício", "✷", "Recompensas de fogos de artifício (ícone acima da barra do chat).",
+                 toggle="take_fireworks"),
+            Card("Presentes da sorte", "♣", "Espera um pouco antes de abrir (sorteio), para outros abrirem primeiro.",
+                 fields=["gift_wait_min", "gift_wait_max"],
+                 summary=lambda s: f"espera {float(s['gift_wait_min']):g}–{float(s['gift_wait_max']):g} s"),
         ]),
         ("Como tocar", [
             Card("Toques rápidos", "⚡", "Quantos toques e com que velocidade nos ovos e festas.",
                  fields=["max_taps", "tap_cooldown"], summary="{max_taps} toques · {tap_cooldown}s entre eles"),
-            Card("Final da escavação", "⏱", "Quando o cronômetro chega perto do fim, toca sem parar até o presente.",
-                 fields=["spam_threshold", "spam_duration"],
-                 summary="faltando {spam_threshold}s · até {spam_duration}s"),
-            Card("Parecer humano", "◔", "Deixa passar algumas de propósito, como um jogador real.",
-                 fields=["skip_chance"], summary=lambda s: f"pula {s['skip_chance']}%" if s["skip_chance"]
-                 else "pega todas"),
+            Card("Final da escavação", "⏱", "Começa a tocar quando restarem de X a Y segundos (sorteio a cada "
+                 "escavação) e toca sem parar até o presente.",
+                 fields=["spam_threshold", "spam_threshold_max", "spam_duration"],
+                 summary=lambda s: (f"faltando {s['spam_threshold']}–{s['spam_threshold_max']}s"
+                                    if int(s["spam_threshold_max"]) > int(s["spam_threshold"])
+                                    else f"faltando {s['spam_threshold']}s") + f" · até {s['spam_duration']}s"),
+            Card("Toque de recompensa atrasado", "◷", "Nestes horários não fica tocando: espera o cronômetro acabar, "
+                 "aguarda alguns segundos e toca UMA vez. Fora deles coleta na hora.",
+                 fields=["late_windows", "late_wait_s"],
+                 summary=lambda s: f"{s['late_windows']} · +{s['late_wait_s']}s" if s["late_windows"].strip()
+                 else "desligado"),
+            Card("Pular algumas", "◔", "Pega algumas e pula outras, como um jogador real: 'pegar 2–3, depois pular "
+                 "1'. Com o primeiro campo em 0 usa a % de pular aleatório.",
+                 fields=["skip_take_min", "skip_take_max", "skip_skip_min", "skip_skip_max", "never_skip_drone",
+                         "skip_chance"],
+                 summary=lambda s: (f"pega {s['skip_take_min']}–{s['skip_take_max']}, pula "
+                                    f"{s['skip_skip_min']}–{s['skip_skip_max']}") if int(s["skip_take_min"])
+                 else (f"pula {s['skip_chance']}%" if s["skip_chance"] else "pega todas")),
             Card("Só avisar", "🔔", "Não toca em nada: só avisa (registro e Telegram).", toggle="detect_only"),
         ]),
         ("No chat", [
-            Card("Mensagens", "✉", "Agradece no chat depois de cada escavação.", toggle="send_message",
-                 fields=["messages", "message_limit_min"],
-                 summary=lambda s: f"no máx. 1 a cada {s['message_limit_min']} min" if s["send_message"]
-                 else "desligado"),
+            Card("Mensagens", "✉", "Agradece no chat depois de cada escavação e de cada ovo/presente. Textos "
+                 "separados por vírgula ou '|': um é sorteado a cada vez.", toggle="send_message",
+                 fields=["messages", "messages_gift", "message_limit_min", "msg_from", "msg_to"],
+                 summary=lambda s: (f"1 a cada {s['message_limit_min']} min · {s['msg_from']}–{s['msg_to']}"
+                                    if s["send_message"] else "desligado")),
         ]),
     ]
 
@@ -196,10 +259,13 @@ class AutoDigs(Task):
             self._thanks(ctx, s)
         return True
 
-    def _thanks(self, ctx, s):
+    def _thanks(self, ctx, s, kind="dig"):
         if not s["send_message"] or time.time() - getattr(self, "_last_msg", 0) < int(s["message_limit_min"]) * 60:
             return
-        msgs = parse_list(s["messages"])
+        if not _clock_in(s.get("msg_from", ""), s.get("msg_to", "")):
+            return
+        text = s.get("messages_gift") if kind == "gift" and str(s.get("messages_gift", "")).strip() else s["messages"]
+        msgs = [m.strip() for m in re.split(r"[,|]", str(text)) if m.strip()]
         if msgs and ctx.tap("btn_chat", 2):
             ctx.tap("tab_chat_alliance", 1.2)  # garante o canal da aliança
             if ctx.tap("chat_input", 2):
@@ -223,6 +289,9 @@ class AutoDigs(Task):
             if s["detect_only"]:
                 ctx.log("◒ Presente da aliança visto (só avisar)")
                 break
+            lo, hi = float(s.get("gift_wait_min", 0) or 0), float(s.get("gift_wait_max", 0) or 0)
+            if hi > 0:
+                ctx.sleep(random.uniform(lo, max(lo, hi)), human=False)  # outros abrem primeiro
             ctx.tap_xy(link[0], link[1], spread=2)
             btn = ctx.ai_wait("gift_popup_btn", 2.5)
             if btn:
@@ -247,9 +316,25 @@ class AutoDigs(Task):
                     ctx.key("esc")
                     ctx.sleep(0.5)
         if done:
-            self._thanks(ctx, s)
+            self._thanks(ctx, s, "gift")
         else:
             ctx.go_home()
+        return True
+
+    def _fireworks(self, ctx, s):
+        """Fogos de artifício: ícone acima da barra do chat → botão de coletar → fecha."""
+        if not s.get("take_fireworks", True) or not ctx.ai("fire_alert", ctx.frame(fresh=False)):
+            return False
+        ctx.tap("fire_alert", 1, after=1.0)
+        got = 0
+        for _ in range(5):
+            if not ctx.tap("fire_claim", 1.2, after=0.8):
+                break
+            got += 1
+        if got:
+            ctx.counters.add("fireworks", got)
+            ctx.log(f"✷ Fogos de artifício coletados ({got})")
+        ctx.go_home()
         return True
 
     def _open_dig(self, ctx, s):
@@ -277,7 +362,9 @@ class AutoDigs(Task):
                 ctx.log("⛏ Escavação encontrada no chat")
                 if ctx.cfg["telegram"].get("notify_digs"):
                     ctx.notify("escavação encontrada")
-                if s["detect_only"] or random.randint(1, 100) <= int(s["skip_chance"]):
+                drone = bool(ctx.seen("drone_chat", 0.4, f) or ctx.seen("Chat Test Flight", 0.4, f)
+                             or ctx.seen("flight_chat", 0.4, f))
+                if s["detect_only"] or self._skip(s, drone):
                     return None
                 ctx.tap_xy(link[0][0], link[0][1], spread=2)
                 hit = ctx.ai_wait("dig_logo", 8)
@@ -292,6 +379,28 @@ class AutoDigs(Task):
             ctx.sleep(0.4, human=False)
         return None
 
+    def _skip(self, s, drone=False):
+        """Pular algumas escavações para parecer jogador: padrão 'pegar 2–3, depois pular 1' ou % aleatório."""
+        if drone and s.get("never_skip_drone", True):
+            return False
+        lo = int(s.get("skip_take_min", 0) or 0)
+        if not lo:
+            return random.randint(1, 100) <= int(s.get("skip_chance", 0) or 0)
+        st = getattr(self, "_skipst", None)
+        if not st:
+            st = self._skipst = {"take": random.randint(lo, max(lo, int(s.get("skip_take_max", lo) or lo))),
+                                 "skip": 0}
+        if st["take"] > 0:
+            st["take"] -= 1
+            if st["take"] == 0:
+                a = int(s.get("skip_skip_min", 1) or 1)
+                st["skip"] = random.randint(a, max(a, int(s.get("skip_skip_max", a) or a)))
+            return False
+        st["skip"] -= 1
+        if st["skip"] <= 0:
+            self._skipst = None
+        return True
+
     # --- estados -------------------------------------------------------
     def _run_ai(self, ctx, s):
         ctx.frame()
@@ -299,6 +408,8 @@ class AutoDigs(Task):
             return True
         if self._st:
             return self._waiting(ctx, s)
+        if self._fireworks(ctx, s):
+            return True
         if self._gift(ctx, s):
             return True
         logo = self._open_dig(ctx, s)
@@ -354,7 +465,11 @@ class AutoDigs(Task):
             self._st = None
             ctx.go_home()
             return False
-        thr = int(s.get("spam_threshold", 13))
+        if "thr" not in st:  # sorteio uma vez por escavação (QB: 5–7 s)
+            lo = int(s.get("spam_threshold", 13))
+            st["thr"] = random.randint(lo, max(lo, int(s.get("spam_threshold_max", 0) or 0)))
+        thr = st["thr"]
+        late = _in_windows(s.get("late_windows", ""))
         end = time.time() + 90
         while time.time() < end:
             f = ctx.frame()
@@ -391,6 +506,22 @@ class AutoDigs(Task):
                 if st["unread"] < 4:
                     ctx.sleep(1.0, human=False)
                     continue
+            elif late and left > 0:
+                st["unread"] = 0
+                if left > 75:
+                    ctx.log(f"⛏ Escavação em {left // 60}:{left % 60:02d} — volto depois (toque atrasado)")
+                    ctx.key("esc")
+                    return False
+                ctx.sleep(min(left, 20), human=False)
+                continue
+            elif late:
+                ctx.sleep(float(s.get("late_wait_s", 3)) * random.uniform(0.9, 1.3), human=False)
+                ctx.tap_xy(*st["logo"], spread=3)  # um toque só, depois do fim
+                ctx.sleep(1.0)
+                ctx.frame()
+                if self._claim(ctx, s):
+                    return True
+                continue
             elif left > thr:
                 st["unread"] = 0
                 if left > 75:
