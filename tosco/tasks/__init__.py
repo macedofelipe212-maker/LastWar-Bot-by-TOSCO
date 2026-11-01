@@ -2716,16 +2716,24 @@ class MapScanner(Task):
         pairs = [xy] if xy else []
         if len(cands) == 2:  # alternativas do OCR, caso a primeira leitura esteja errada
             pairs += [(a, b) for a in cands[0][:2] for b in cands[1][:3] if (a, b) not in pairs]
-        for p in pairs[:5]:
-            # confere: pula para o X/Y lido e procura o meio da tela de chegada na imagem da cidade (o pulo
-            # aproxima o zoom; _same_place compara em várias escalas)
+        # o erro típico do OCR é trocar o 1º dígito (417 → 217/117): tenta essas variações por último
+        for a, b in list(pairs[:3]):
+            for d in "123456789":
+                for alt in ((a, int(d + str(b)[1:])) if len(str(b)) > 1 else None,
+                            (int(d + str(a)[1:]), b) if len(str(a)) > 1 else None):
+                    if alt and alt not in pairs and max(alt) < 1000:
+                        pairs.append(alt)
+        for p in pairs[:12]:
+            # confere: pula para o X/Y lido. A casinha do mapa (home_btn, "N km") só aparece LONGE da sua cidade:
+            # se ela aparecer, a leitura está errada. (Comparar imagens enganava: neve parece neve.)
             if not self._goto(ctx, *p):
                 continue
             here = ctx.frame()
-            if self._same_place(ref, here):
+            if not ctx.seen("home_btn", 0.45, here) and self._same_place(ref, here):
                 return p
             ctx.log(f"◎ Leitura X:{p[0]} Y:{p[1]} não bate com a cidade — tentando outra", "warn")
-        return xy
+        ctx.log("◎ Não consegui confirmar o X/Y da sua cidade — use 'Centro: coordenadas' na página do mapa", "warn")
+        return None
 
     @staticmethod
     def _same_place(a, b):
@@ -3104,7 +3112,8 @@ class MapScanner(Task):
             ctx.log(f"◎ Tarefa {tag} em X:{ix} Y:{iy} coletada")
             marched = True
         elif info["share"] and self._wants(s, info, "ts") and not rec.get("shared"):
-            ready = info["left"] is None or info["left"] <= SHARE_BEFORE_S
+            # "em andamento" sem tempo na ficha NÃO conta como pronta (visto no jogo): só ≤10 min ou já saqueável
+            ready = (info["left"] is not None and info["left"] <= SHARE_BEFORE_S) or bool(info["plunder"])
             if ready and self._share(ctx, s, info):
                 rec["shared"] = True
                 ctx.log(f"◎ Tarefa {tag} em X:{ix} Y:{iy} compartilhada com a aliança")
