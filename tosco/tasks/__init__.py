@@ -871,7 +871,9 @@ class Daily(Task):
                     ctx.press_back()
             ctx.go_home()
         if s["train"] and ctx.tap("btn_train", 2):
-            while ctx.tap("btn_like", 1, after=0.3):
+            for _ in range(30):  # limite: um botão que não some não prende o bot
+                if not ctx.tap("btn_like", 1, after=0.3):
+                    break
                 ctx.counters.add("train_likes")
             ctx.go_home()
         if s["vip"] and ctx.tap("btn_vip", 2):
@@ -881,7 +883,9 @@ class Daily(Task):
             ctx.tap("btn_claim_all", 2)
             ctx.go_home()
         if s["chests"] and ctx.tap("btn_daily_tasks", 2):
-            while ctx.tap("btn_claim", 1, after=0.5):
+            for _ in range(30):
+                if not ctx.tap("btn_claim", 1, after=0.5):
+                    break
                 ctx.counters.add("daily_claims")
             for x, y in ctx.find_all("daily_chest", 0.85):
                 ctx.tap_xy(x, y)
@@ -1236,7 +1240,9 @@ class Trucks(Task):
         ctx.to_base()
         if not ctx.tap("btn_trucks", 3):
             return
-        while ctx.tap("btn_truck_claim", 1, after=0.8):
+        for _ in range(8):
+            if not ctx.tap("btn_truck_claim", 1, after=0.8):
+                break
             ctx.back()
             ctx.counters.add("trucks_claimed")
         days_ok = not str(s.get("send_days", "")).strip() or day_in(ctx, s["send_days"])
