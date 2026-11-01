@@ -711,6 +711,7 @@ class Engine:
         self.current = "—"
         self.last_frame = None
         self.last_frame_t = 0.0
+        self.capture_ms = 0
         self.recent_frames = collections.deque(maxlen=6)  # quando o bot tirou o último print (a janela "o que a IA vê" reaproveita)
         self.last_run = {}
         self.queue = []          # módulos pedidos com "executar agora"
@@ -789,12 +790,14 @@ class Engine:
             self.state_cb()
 
     def capture(self):
+        t0 = time.time()
         try:
             img = self.backend.capture()
         except Exception as ex:
             self.log(f"captura falhou: {ex}", "warn")
             img = None
         if img is not None:
+            self.capture_ms = int((time.time() - t0) * 1000)
             self.last_frame, self.last_frame_t = img, time.time()
             # últimos prints, um a cada 5 s, para o pacote de diagnóstico (ficam só na memória)
             if not self.recent_frames or self.last_frame_t - self.recent_frames[-1][0] >= 5:
@@ -813,12 +816,28 @@ class Engine:
         if not oneshot:
             self.session = {}
         winapi._mark()  # o clique em "Iniciar" não conta como você usando o PC
+        self._apply_pc_settings(True)
         self._schedule_break()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
         if not oneshot:
             self.log("▶ Motor iniciado")
         self._emit()
+
+    def _apply_pc_settings(self, on):
+        """PC acordado (SetThreadExecutionState) e prioridade do processo enquanto o bot roda."""
+        try:
+            es = 0x80000000 | (0x00000001 | 0x00000002 if on and self.cfg.data.get("keep_awake", True) else 0)
+            winapi.ctypes.windll.kernel32.SetThreadExecutionState(es)
+        except Exception:
+            pass
+        try:
+            import psutil
+            pr = {"acima": psutil.ABOVE_NORMAL_PRIORITY_CLASS, "abaixo": psutil.BELOW_NORMAL_PRIORITY_CLASS}
+            psutil.Process().nice(pr.get(self.cfg.data.get("process_priority"), psutil.NORMAL_PRIORITY_CLASS)
+                                  if on else psutil.NORMAL_PRIORITY_CLASS)
+        except Exception:
+            pass
 
     def stop(self):
         if self.running:
@@ -945,13 +964,31 @@ class Engine:
             return False
         h = self.cfg.data["human"]
         if h.get("breaks_enabled") and time.time() >= self._next_break:
-            mins = float(h.get("break_minutes", 8)) * random.uniform(0.7, 1.3)
-            self.log(f"☕ Pausa humana de {mins:.0f} min")
-            self.current = "pausa humana"
-            self._emit()
-            ctx.sleep(mins * 60, human=False)
-            self._schedule_break()
+            self._human_break(ctx, h)
         return True
+
+    def _human_break(self, ctx, h):
+        """Pausa de 'jogador ausente' (ritmo de jogo do LWFarmBot): às vezes fecha o jogo; pode continuar pegando
+        escavações e/ou entrando em mobilizações durante a pausa (aí o jogo fica aberto)."""
+        mins = float(h.get("break_minutes", 8)) * random.uniform(0.7, 1.3)
+        keep = [tid for tid, k in (("auto_digs", "break_keep_digs"), ("auto_join", "break_keep_rallies")) if h.get(k)]
+        close = not keep and self.backend.name == "pc" and random.randint(1, 100) <= int(h.get("break_close_pct", 0))
+        self.log(f"☕ Pausa humana de {mins:.0f} min" + (" (jogo fechado)" if close else "")
+                 + (" — continuo: " + ", ".join(keep) if keep else ""))
+        self.current = "pausa humana"
+        self._emit()
+        if close:
+            hwnd = winapi.find_window(self.cfg.data["game_window_title"])
+            if hwnd:
+                winapi.user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE; o watchdog reabre depois
+        end = time.time() + mins * 60
+        while time.time() < end:
+            for tid in keep:
+                t = self.task_by_id(tid)
+                if t:
+                    self._run_task(ctx, t)
+            ctx.sleep(30 if keep else min(60, max(1, end - time.time())), human=False)
+        self._schedule_break()
 
     def _restart_game(self, ctx, reason):
         """Fecha o jogo e deixa o watchdog reabri-lo (precisa do caminho do jogo em SISTEMA)."""
@@ -1099,6 +1136,7 @@ class Engine:
         except Exception as ex:
             self.log(f"Falha no motor: {ex}", "error")
         finally:
+            self._apply_pc_settings(False)
             self.current = "—"
             self.only = None
             self.log("■ Todas as tarefas paradas")

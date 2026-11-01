@@ -1,6 +1,8 @@
 """Janela principal TOSCO."""
 import datetime as dt
 import html
+import json
+import random
 import os
 import subprocess
 import sys
@@ -10,7 +12,8 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPixmap, QTextCharFormat
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDoubleSpinBox, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDateTimeEdit, QDoubleSpinBox,
+                               QFileDialog,
                                QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
@@ -531,6 +534,8 @@ class MainWindow(QMainWindow):
         self.session_lbl.setTextFormat(Qt.RichText)
         self.session_lbl.setStyleSheet(f"border:1px solid {T.LINE};border-radius:6px;padding:8px 10px")
         stats.addWidget(self.session_lbl, 2, 0, 1, 3)
+        self.perf_lbl = muted("")  # medições como no LWFarmBot: IA, captura, CPU/memória do bot
+        stats.addWidget(self.perf_lbl, 3, 0, 1, 3)
         self.dash_stats = QWidget()
         self.dash_stats.setLayout(stats)
 
@@ -696,19 +701,20 @@ class MainWindow(QMainWindow):
 
     # ----- agenda
     ACTIONS = [("start", "Iniciar bot"), ("stop", "Parar bot"), ("pause", "Pausar"), ("resume", "Retomar"),
-               ("open_game", "Abrir jogo"), ("close_game", "Fechar jogo"), ("run", "Executar módulo")]
+               ("open_game", "Abrir jogo"), ("close_game", "Fechar jogo"), ("run", "Executar módulo"),
+               ("set_main", "Trocar o foco do bot para o módulo")]
 
     def _page_agenda(self):
         w = QWidget()
         lay = QVBoxLayout(w)
         c = Card("Eventos agendados")
-        c.lay.addWidget(muted("Rode qualquer módulo, abra/feche o jogo ou ligue/desligue o bot no dia e horário "
-                              "escolhidos. Dias: " + ",".join(DAYS) + ". Cada módulo também tem dias/horário próprios "
-                              "em ⚙ AJUSTES."))
-        self.ev_table = QTableWidget(0, 6)
-        self.ev_table.setHorizontalHeaderLabels(["ATIVO", "HORA", "DIAS", "AÇÃO", "MÓDULO", ""])
+        c.lay.addWidget(muted("Rode qualquer módulo, troque o foco, abra/feche o jogo ou ligue/desligue o bot no dia "
+                              "e horário escolhidos. Dias: " + ",".join(DAYS) + ". JANELA: cada execução começa num "
+                              "momento aleatório dentro desses minutos, diferente a cada dia (0 = na hora exata)."))
+        self.ev_table = QTableWidget(0, 7)
+        self.ev_table.setHorizontalHeaderLabels(["ATIVO", "HORA", "JANELA", "DIAS", "AÇÃO", "MÓDULO", ""])
         self.ev_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.ev_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.ev_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.ev_table.verticalHeader().setVisible(False)
         c.lay.addWidget(self.ev_table, 1)
         r = QHBoxLayout()
@@ -716,6 +722,7 @@ class MainWindow(QMainWindow):
         r.addStretch()
         c.lay.addLayout(r)
         lay.addWidget(c, 1)
+        lay.addWidget(self._zd_event_card())
         self._fill_events()
         return w
 
@@ -731,16 +738,19 @@ class MainWindow(QMainWindow):
             te.setDisplayFormat("HH:mm")
             te.timeChanged.connect(lambda v, ev=ev: (ev.__setitem__("time", v.toString("HH:mm")), self.save_soon()))
             t.setCellWidget(i, 1, te)
+            jw = QSpinBox(minimum=0, maximum=240, value=int(ev.get("window", 0) or 0), suffix=" min")
+            jw.valueChanged.connect(lambda v, ev=ev: (ev.__setitem__("window", v), self.save_soon()))
+            t.setCellWidget(i, 2, jw)
             de = QLineEdit(ev.get("days", ",".join(DAYS)))
             de.textChanged.connect(lambda v, ev=ev: (ev.__setitem__("days", v), self.save_soon()))
-            t.setCellWidget(i, 2, de)
+            t.setCellWidget(i, 3, de)
             ac = QComboBox()
             for k, n in self.ACTIONS:
                 ac.addItem(n, k)
             ac.setCurrentIndex(max(0, [k for k, _ in self.ACTIONS].index(ev.get("action", "start"))))
             ac.currentIndexChanged.connect(lambda _, ev=ev, ac=ac: (ev.__setitem__("action", ac.currentData()),
                                                                    self.save_soon()))
-            t.setCellWidget(i, 3, ac)
+            t.setCellWidget(i, 4, ac)
             mo = QComboBox()
             for task in ALL_TASKS:
                 mo.addItem(task.name, task.id)
@@ -748,8 +758,8 @@ class MainWindow(QMainWindow):
             mo.setCurrentIndex(max(0, idx))
             mo.currentIndexChanged.connect(lambda _, ev=ev, mo=mo: (ev.__setitem__("target", mo.currentData()),
                                                                    self.save_soon()))
-            t.setCellWidget(i, 4, mo)
-            t.setCellWidget(i, 5, button("✕", "ghost", lambda _=False, ev=ev: (evs.remove(ev), self.save_soon(),
+            t.setCellWidget(i, 5, mo)
+            t.setCellWidget(i, 6, button("✕", "ghost", lambda _=False, ev=ev: (evs.remove(ev), self.save_soon(),
                                                                                self._fill_events())))
 
     def _add_event(self):
@@ -758,13 +768,27 @@ class MainWindow(QMainWindow):
         self.save_soon()
         self._fill_events()
 
+    @staticmethod
+    def _event_time(ev, i, day):
+        """Hora do evento hoje: HORA + um sorteio de 0..JANELA minutos, fixo para o dia (muda a cada dia)."""
+        try:
+            base = dt.datetime.combine(day, dt.datetime.strptime(ev.get("time", "08:00"), "%H:%M").time())
+        except ValueError:
+            return None
+        win = int(ev.get("window", 0) or 0)
+        off = random.Random(f"{day.isoformat()}#{i}#{ev.get('time')}").randint(0, win) if win else 0
+        return base + dt.timedelta(minutes=off)
+
     def _check_events(self):
+        self._check_zd_event()
         now = dt.datetime.now()
         stamp = now.strftime("%Y-%m-%d %H:%M")
         day = DAYS[now.weekday()]
         for i, ev in enumerate(self.cfg.data["events"]):
             key = (i, stamp)
-            if not ev.get("enabled", True) or ev.get("time") != now.strftime("%H:%M") or key in self._events_done:
+            at = self._event_time(ev, i, now.date())
+            if not ev.get("enabled", True) or not at or at.strftime("%H:%M") != now.strftime("%H:%M") \
+                    or key in self._events_done:
                 continue
             if day not in [d.strip()[:3] for d in ev.get("days", "").split(",")]:
                 continue
@@ -781,6 +805,8 @@ class MainWindow(QMainWindow):
                 self.engine.resume()
             elif a == "run":
                 self.engine.run_now(ev.get("target"))
+            elif a == "set_main":
+                self.set_main(ev.get("target"))
             elif a == "open_game":
                 exe = self.cfg.data.get("game_exe_path")
                 if exe and os.path.exists(exe):
@@ -790,6 +816,111 @@ class MainWindow(QMainWindow):
                 h = winapi.find_window(self.cfg.data["game_window_title"])
                 if h:
                     winapi.user32.PostMessageW(h, 0x0010, 0, 0)  # WM_CLOSE
+
+    # ----- Evento Zumbis Dourados (salvo fora dos perfis: trocar de perfil não o perde)
+    ZD_FILE = os.path.join(DATA_DIR, "evento_zumbis.json")
+
+    def _zd_load(self):
+        try:
+            with open(self.ZD_FILE, encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            return {"enabled": False, "start": "", "days": 3, "every": 14, "on_start": "hunt",
+                    "on_end": "", "profile": "", "normal_profile": ""}
+
+    def _zd_save(self):
+        try:
+            with open(self.ZD_FILE, "w", encoding="utf-8") as fh:
+                json.dump(self.zd, fh, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
+    def _zd_event_card(self):
+        self.zd = self._zd_load()
+        z = self.zd
+        c = Card("Evento Zumbis Dourados")
+        c.lay.addWidget(muted("Quando o evento começa, o foco do bot vai para a página escolhida (e, se quiser, muda "
+                              "para o perfil do evento); quando termina, volta. Dura 3 dias e repete a cada 2 semanas."))
+        f = QFormLayout()
+        on = Toggle(bool(z.get("enabled")))
+        on.toggled.connect(lambda v: (z.__setitem__("enabled", v), self._zd_save()))
+        f.addRow(muted("Ligado"), on)
+        st = QDateTimeEdit()
+        st.setDisplayFormat("dd/MM/yyyy HH:mm")
+        st.setCalendarPopup(True)
+        try:
+            st.setDateTime(dt.datetime.fromisoformat(z["start"]))
+        except (KeyError, ValueError):
+            st.setDateTime(dt.datetime.now().replace(minute=0, second=0, microsecond=0))
+        st.dateTimeChanged.connect(lambda v: (z.__setitem__("start", v.toPython().isoformat(timespec="minutes")),
+                                              self._zd_save()))
+        f.addRow(muted("O próximo evento começa (hora do PC)"), st)
+        du = QSpinBox(minimum=1, maximum=14, value=int(z.get("days", 3)), suffix=" dias")
+        du.valueChanged.connect(lambda v: (z.__setitem__("days", v), self._zd_save()))
+        f.addRow(muted("Dura"), du)
+        ev = QSpinBox(minimum=1, maximum=60, value=int(z.get("every", 14)), suffix=" dias")
+        ev.valueChanged.connect(lambda v: (z.__setitem__("every", v), self._zd_save()))
+        f.addRow(muted("Repete a cada"), ev)
+        mains = [(t.id, t.name) for t in ALL_TASKS if t.main_capable]
+        osel = QComboBox()
+        for k, n in mains:
+            osel.addItem(n, k)
+        osel.setCurrentIndex(max(0, osel.findData(z.get("on_start", "hunt"))))
+        osel.currentIndexChanged.connect(lambda _: (z.__setitem__("on_start", osel.currentData()), self._zd_save()))
+        f.addRow(muted("Quando começar, foco em"), osel)
+        esel = QComboBox()
+        esel.addItem("A mesma de antes", "")
+        for k, n in mains:
+            esel.addItem(n, k)
+        esel.setCurrentIndex(max(0, esel.findData(z.get("on_end", ""))))
+        esel.currentIndexChanged.connect(lambda _: (z.__setitem__("on_end", esel.currentData()), self._zd_save()))
+        f.addRow(muted("Quando terminar, foco em"), esel)
+        pf = QComboBox()
+        pf.addItem("(não trocar de perfil)", "")
+        for n in sorted(self.cfg.profiles):
+            pf.addItem(n, n)
+        pf.setCurrentIndex(max(0, pf.findData(z.get("profile", ""))))
+        pf.currentIndexChanged.connect(lambda _: (z.__setitem__("profile", pf.currentData()), self._zd_save()))
+        f.addRow(muted("Perfil do evento (opcional)"), pf)
+        c.lay.addLayout(f)
+        return c
+
+    def _zd_active(self, now=None):
+        z = getattr(self, "zd", None) or {}
+        if not z.get("enabled") or not z.get("start"):
+            return False
+        try:
+            start = dt.datetime.fromisoformat(z["start"])
+        except ValueError:
+            return False
+        now = now or dt.datetime.now()
+        if now < start:
+            return False
+        every = dt.timedelta(days=max(1, int(z.get("every", 14))))
+        k = int((now - start) / every)
+        return now < start + k * every + dt.timedelta(days=int(z.get("days", 3)))
+
+    def _check_zd_event(self):
+        active = self._zd_active()
+        was = bool(self.zd.get("_active")) if hasattr(self, "zd") else False
+        if active == was:
+            return
+        z = self.zd
+        z["_active"] = active
+        if active:
+            z["_prev_main"] = self.cfg.data.get("main_task", "")
+            z["_prev_profile"] = self.cfg.active
+            if z.get("profile") and z["profile"] != self.cfg.active and z["profile"] in self.cfg.profiles:
+                self.cfg.switch(z["profile"])
+                self.engine.log(f"☣ Evento Zumbis Dourados: perfil '{z['profile']}' (reabra o {APP} para editar)")
+            self.set_main(z.get("on_start", "hunt"))
+            self.engine.log("☣ Evento Zumbis Dourados começou")
+        else:
+            if z.get("profile") and z.get("_prev_profile") and z["_prev_profile"] != self.cfg.active:
+                self.cfg.switch(z["_prev_profile"])
+            self.set_main(z.get("on_end") or z.get("_prev_main", ""))
+            self.engine.log("☣ Evento Zumbis Dourados terminou — foco de volta")
+        self._zd_save()
 
     # ----- clicker
     def _page_clicker(self):
@@ -947,6 +1078,19 @@ class MainWindow(QMainWindow):
             form.addRow(muted(label), t)
             return t
 
+        # faixa "Confira sua configuração" (como no QB): some quando não falta nada
+        self.cfg_banner = QFrame()
+        self.cfg_banner.setStyleSheet(f"QFrame{{border:1px solid {T.AMBER};border-radius:6px;"
+                                      f"background:{T.rgba(T.AMBER, 0.08)}}}")
+        bl = QHBoxLayout(self.cfg_banner)
+        bl.setContentsMargins(12, 8, 12, 8)
+        self.cfg_banner_lbl = QLabel()
+        self.cfg_banner_lbl.setWordWrap(True)
+        self.cfg_banner_lbl.setStyleSheet(f"color:{T.AMBER};border:none;background:transparent")
+        bl.addWidget(self.cfg_banner_lbl, 1)
+        bl.addWidget(button("Definir", "warn", self._pick_exe))
+        lay.addWidget(self.cfg_banner)
+
         g = Card("Plataforma")
         f = QFormLayout()
         plat = QComboBox()
@@ -965,7 +1109,7 @@ class MainWindow(QMainWindow):
         f.addRow(muted("Janela do jogo (PC)"), trow)
         exe = QHBoxLayout()
         self.f_exe = QLineEdit(d["game_exe_path"])
-        self.f_exe.textChanged.connect(lambda v: self._set("game_exe_path", v))
+        self.f_exe.textChanged.connect(lambda v: (self._set("game_exe_path", v), self._update_cfg_banner()))
         exe.addWidget(self.f_exe)
         exe.addWidget(button("…", None, self._pick_exe))
         f.addRow(muted("Executável (reabrir após crash)"), exe)
@@ -996,6 +1140,14 @@ class MainWindow(QMainWindow):
         rt.setInputMask("99:99")
         rt.textChanged.connect(lambda v: self._set("reset_time", v))
         f.addRow(muted("Horário de reset diário do servidor"), rt)
+        today = QComboBox()
+        today.addItems(["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"])
+        local = (dt.datetime.now() - dt.timedelta(hours=int(d.get("reset_time", "05:00")[:2] or 5))).weekday()
+        today.setCurrentIndex((local + int(d.get("game_day_offset", 0) or 0)) % 7)
+        today.currentIndexChanged.connect(lambda i, local=local: self._set("game_day_offset", (i - local) % 7))
+        today.setToolTip("Escolha que dia é AGORA dentro do jogo. Para a maioria bate com o dia local, mas o fuso "
+                         "do servidor pode diferir. Serve para regras como 'não coletar sexta/sábado'.")
+        f.addRow(muted("Hoje é (no jogo)"), today)
         ld = QDoubleSpinBox(minimum=0.2, maximum=60, value=float(d["loop_delay"]), suffix=" s")
         ld.valueChanged.connect(lambda v: self._set("loop_delay", v))
         f.addRow(muted("Pausa entre ciclos"), ld)
@@ -1060,8 +1212,27 @@ class MainWindow(QMainWindow):
         bm = QSpinBox(minimum=1, maximum=120, value=int(h["break_minutes"]), suffix=" min")
         bm.valueChanged.connect(lambda x: (h.__setitem__("break_minutes", x), self.save_soon()))
         f.addRow(muted("…durando ~"), bm)
+        bc = QSpinBox(minimum=0, maximum=100, value=int(h.get("break_close_pct", 0)), suffix=" %")
+        bc.valueChanged.connect(lambda x: (h.__setitem__("break_close_pct", x), self.save_soon()))
+        bc.setToolTip("Chance de fechar o jogo durante a pausa (como um jogador que sai). O bot reabre depois "
+                      "(precisa do caminho do jogo).")
+        f.addRow(muted("…fechar o jogo na pausa (chance)"), bc)
+        tg(h, "break_keep_digs", "…continuar pegando escavações durante a pausa", f)
+        tg(h, "break_keep_rallies", "…continuar entrando em mobilizações durante a pausa", f)
         hcard.lay.addLayout(f)
         lay.addWidget(hcard)
+
+        pc = Card("Este PC")
+        f = QFormLayout()
+        tg(d, "keep_awake", "Manter o PC acordado enquanto o bot roda", f)
+        pr = QComboBox()
+        for val, txt in (("normal", "Normal"), ("acima", "Acima do normal"), ("abaixo", "Abaixo do normal")):
+            pr.addItem(txt, val)
+        pr.setCurrentIndex(max(0, pr.findData(d.get("process_priority", "normal"))))
+        pr.currentIndexChanged.connect(lambda _: self._set("process_priority", pr.currentData()))
+        f.addRow(muted("Prioridade do bot"), pr)
+        pc.lay.addLayout(f)
+        lay.addWidget(pc)
 
 
         ui = Card("Interface e inicialização")
@@ -1106,12 +1277,49 @@ class MainWindow(QMainWindow):
                                "for ajudar."))
         r = QHBoxLayout()
         r.addWidget(button("📦 Gerar pacote de diagnóstico", "accent", self._make_diag))
+        r.addWidget(button("🩺 Testar calibração", None, self._calibrate,
+                           "Percorre as telas (eventos, inventário, aliança, chat, posto secreto, heróis) e mostra no "
+                           "registro o que a IA reconhece em cada uma — sem tocar em nada que gaste algo."))
         r.addWidget(button("📁 Pasta", "ghost", lambda: os.startfile(self._diag_dir())))
         r.addStretch(1)
         dg.lay.addLayout(r)
         lay.addWidget(dg)
         lay.addStretch(1)
+        self._update_cfg_banner()
         return scroll(w)
+
+    def _perf_text(self):
+        e = self.engine
+        parts = [f"IA {e.yolo.last_ms} ms/tela" if e.yolo.last_ms else "IA —",
+                 f"captura {e.capture_ms} ms" if e.capture_ms else "captura —"]
+        if e.last_frame is not None:
+            h, w = e.last_frame.shape[:2]
+            parts.append(f"jogo {w}×{h}" + ("" if abs(w / h - 16 / 9) < 0.05 else " (fora de 16:9)"))
+        try:
+            import psutil
+            pr = psutil.Process()
+            if not hasattr(self, "_cpu_primed"):
+                pr.cpu_percent(None)
+                self._cpu_primed = True
+            parts.append(f"bot {pr.cpu_percent(None) / psutil.cpu_count():.0f}% CPU · "
+                         f"{pr.memory_info().rss / 2 ** 30:.1f} GB".replace(".", ","))
+        except Exception:
+            pass
+        return "⚙ " + " · ".join(parts)
+
+    def _update_cfg_banner(self):
+        d = self.cfg.data
+        miss = []
+        if d.get("backend") == "pc" and not (d.get("game_exe_path") and os.path.exists(d["game_exe_path"])):
+            miss.append("o caminho do jogo ainda não foi definido (sem ele o bot não reabre o jogo após travar)")
+        if not self.engine.yolo.available():
+            miss.append("a IA está sem modelo (data/modelos)")
+        self.cfg_banner_lbl.setText("<b>Confira sua configuração</b><br>" + "<br>".join(miss))
+        self.cfg_banner.setVisible(bool(miss))
+
+    def _calibrate(self):
+        from ..core import diag
+        self.engine.run_job("🩺 Teste de calibração", diag.calibrate)
 
     def _diag_dir(self):
         from ..core import diag
@@ -1744,6 +1952,7 @@ class MainWindow(QMainWindow):
             self.stat[k].set(e.stats[k])
         for k in ("digs", "joins_total", "hunts"):
             self.stat[k].set(e.counters.get(k))
+        self.perf_lbl.setText(self._perf_text())
         lines = e.session_lines()
         parts = [f"<span style='color:{T.RED if bad else T.TEXT}'>{html.escape(t)}</span>" for t, bad in lines]
         self.session_lbl.setText(f"<b style='color:{T.CYAN}'>ESTA SESSÃO</b>&nbsp;&nbsp;" +

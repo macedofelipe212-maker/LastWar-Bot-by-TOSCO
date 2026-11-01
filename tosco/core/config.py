@@ -18,6 +18,9 @@ DEFAULTS = {
     "resize_to": "auto",                  # auto = tamanho padrão 16:9 que cabe na tela · "" = não mexer · "WxH"
     "restart_wait_seconds": 90,
     "reset_time": "05:00",
+    "game_day_offset": 0,                 # "Hoje é (no jogo)": o dia da semana do servidor menos o do PC
+    "keep_awake": True,                   # não deixa o PC dormir enquanto o bot roda
+    "process_priority": "normal",         # normal | acima | abaixo
     "loop_delay": 1.0,
     # visão
     "ocr_enabled": True,
@@ -34,7 +37,8 @@ DEFAULTS = {
     "user_resume_s": 20,                  # volta após N s sem você mexer
     # comportamento humano
     "human": {"mouse_curve": True, "delay_factor": 1.0, "tap_spread": 0.25,
-              "breaks_enabled": False, "break_every_min": 90, "break_minutes": 8},
+              "breaks_enabled": False, "break_every_min": 90, "break_minutes": 8,
+              "break_close_pct": 0, "break_keep_digs": False, "break_keep_rallies": False},
     # interface
     "ui": {"language": "pt", "scale": 100, "start_with_windows": False, "start_minimized": False,
            "autostart_engine": False},

@@ -50,6 +50,51 @@ def _env(engine):
     }
 
 
+# Teste de calibração (como o diagnóstico do LWFarmBot): percorre telas e confere o que a IA reconhece, SEM tocar
+# em nada que gaste algo. (zona, como abrir, classes esperadas na tela aberta)
+CALIB_ZONES = [
+    ("Tela principal", None, ("World", "Base", "Chat", "Alliance Tab", "Event", "Heroes", "Inventory", "Mail")),
+    ("Eventos", "btn_events", ("screen_event", "event_nav", "arms_race_score")),
+    ("Inventário", "btn_inventory", ("screen_inventory", "Return")),
+    ("Aliança", "btn_alliance", ("alliance_tech_btn", "alliance_wars_btn", "Return")),
+    ("Chat", "btn_chat", ("chat_ally", "chat_input", "chat_text")),
+    ("Posto Secreto", "btn_secret_squad", ("secret_tab_perso", "secret_tab_perso_selected", "secret_task_card")),
+    ("Heróis", "btn_heroes", ("recruit_btn", "Return")),
+]
+
+
+def calibrate(ctx):
+    """Roda como ação avulsa do motor. Devolve [(zona, abriu, [(classe, score ou None)])] e escreve no registro."""
+    out = []
+    if not ctx.ai_on():
+        ctx.log("🩺 Calibração: ligue a IA em Configurações", "warn")
+        return out
+    for zone, opener, classes in CALIB_ZONES:
+        ctx.go_home()
+        opened = True
+        if opener:
+            opened = bool(ctx.tap(opener, 2.5, after=1.5))
+        f = ctx.frame()
+        det = ctx.dets(f, 0.2)
+        found = [(c, round(det[c][0][2], 2) if c in det else None) for c in classes]
+        ok = opened and any(sc is not None and sc >= 0.4 for _, sc in found)
+        out.append((zone, ok, found))
+        seen = ", ".join(f"{c} {sc:.2f}" for c, sc in found if sc is not None) or "nada"
+        ctx.log(f"🩺 {'✓' if ok else '✗'} {zone}" + ("" if opened else " (não abriu)") + f" — {seen}",
+                "info" if ok else "warn")
+        try:
+            os.makedirs(DIAG_DIR, exist_ok=True)
+            cv2.imwrite(os.path.join(DIAG_DIR, f"calibracao_{len(out)}.jpg"), f, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        except Exception:
+            pass
+    ctx.go_home()
+    good = sum(1 for _, ok, _ in out if ok)
+    h, w = ctx.frame(fresh=False).shape[:2]
+    ctx.log(f"🩺 Calibração: {good}/{len(out)} telas reconhecidas · janela {w}×{h}"
+            + ("" if abs(w / h - 16 / 9) < 0.05 else " — proporção fora de 16:9: use o tamanho automático"))
+    return out
+
+
 def make(engine, include_prints=True):
     """Cria o zip em data/diagnostico e devolve o caminho."""
     os.makedirs(DIAG_DIR, exist_ok=True)
