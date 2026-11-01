@@ -2544,13 +2544,39 @@ class MapScanner(Task):
     def _center(f):
         return f.shape[1] / 2, f.shape[0] / 2
 
-    def _goto(self, ctx, x, y):
+    def _close_panels(self, ctx):
+        """ESC até voltar ao mapa, sem nunca apertar ESC na tela principal (lá ele abre 'Sair do jogo?'); se esse
+        diálogo aparecer mesmo assim, cancela."""
+        for _ in range(4):
+            f = ctx.frame()
+            if ctx.find("dlg_exit_game", frame=f):
+                if not ctx.tap("btn_exit_cancel", 1.0):
+                    ctx.key("esc")
+                ctx.sleep(0.5)
+                continue
+            if ctx.on_main(f):
+                break
+            ctx.key("esc")
+            ctx.sleep(0.5)
+        ctx.to_world()
+
+    def _goto(self, ctx, x, y, tries=3):
+        """Pula para a casa (x, y) pela busca do jogo. Se a caixa de coordenadas não abrir: registra, fecha o que
+        estiver aberto (ESC) e refaz o ciclo — até `tries` vezes; nunca trava a varredura."""
+        for attempt in range(1, tries + 1):
+            if self._goto_once(ctx, x, y):
+                return True
+            ctx.log(f"◎ Busca por coordenadas não abriu para X:{x} Y:{y} (tentativa {attempt}/{tries}) — "
+                    f"fechando janelas e tentando de novo", "warn")
+            self._close_panels(ctx)
+        return False
+
+    def _goto_once(self, ctx, x, y):
         """Lupa → campos X e Y (IA coord_input, da esquerda para a direita) → Ir. O mapa centraliza na casa."""
         if not ctx.tap("btn_search", 2, after=1.0):
             return False
         boxes = sorted(ctx.ai("coord_input", ctx.frame()), key=lambda b: b[0])[:2]
         if len(boxes) < 2:
-            ctx.press_back()
             return False
         for b, v in zip(boxes, (x, y)):
             ctx.tap_xy(b[0], b[1], spread=1)
@@ -2693,11 +2719,17 @@ class MapScanner(Task):
         ctx.log(f"◎ Área X:{c[0]}±{s['radius']} Y:{c[1]}±{s['radius']} — {len(pts)} pulos "
                 f"(cada tela ≈ {2 * half:.0f}×{2 * half:.0f} casas)")
         st.begin_scan()
-        found = 0
+        found, misses = 0, 0
         for i, (gx, gy) in enumerate(pts, 1):
             if not self._goto(ctx, gx, gy):
-                ctx.log(f"◎ Não consegui pular para X:{gx} Y:{gy}", "warn")
+                misses += 1
+                ctx.log(f"◎ Não consegui pular para X:{gx} Y:{gy} — seguindo para o próximo ponto", "warn")
+                if misses >= 3:  # 3 pontos seguidos sem busca: algo mudou na tela (evento, janela nova)
+                    ctx.log("◎ Varredura interrompida: a busca por coordenadas falhou 3 vezes seguidas. Rode o "
+                            "teste de calibração (Configurações) para ver o que a IA reconhece.", "error")
+                    break
                 continue
+            misses = 0
             f = ctx.frame()
             x0, y0 = self._center(f)
             for cat in cats:
