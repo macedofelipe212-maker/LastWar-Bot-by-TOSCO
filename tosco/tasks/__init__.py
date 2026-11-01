@@ -14,7 +14,7 @@ import re
 import time
 
 from ..core import catalog, rapid, tesseract
-from ..core.engine import Card, Field, Task
+from ..core.engine import DAYS, Card, Field, Task
 from ..core.ocr import norm
 from ..core.paths import REPORT_DIR
 from ..core.scanner import CAT_NAMES, CATEGORIES, DEFAULTS as SCAN_DEFAULTS, ScanStore, measure_shift
@@ -65,6 +65,37 @@ def march(ctx, squads, weak_ok=False):
             if ctx.tap("btn_march", 2):
                 return sent(sq)
     return sent("auto") if ctx.tap("btn_march", 2) else None
+
+
+def game_weekday(ctx):
+    """Dia da semana NO JOGO (0 = segunda): relógio do PC menos o horário de reset, mais o ajuste de
+    Configurações ('Hoje é (no jogo)')."""
+    try:
+        h, m = map(int, str(ctx.cfg.get("reset_time", "05:00")).split(":"))
+    except ValueError:
+        h, m = 5, 0
+    d = dt.datetime.now() - dt.timedelta(hours=h, minutes=m)
+    return (d.weekday() + int(ctx.cfg.get("game_day_offset", 0) or 0)) % 7
+
+
+def day_in(ctx, text):
+    """'sab, dom' contém o dia de hoje no jogo? Campo vazio = nenhum dia."""
+    want = {norm(d)[:3] for d in re.split(r"[,; ]+", str(text or "")) if d.strip()}
+    return DAYS[game_weekday(ctx)] in want
+
+
+def _box_has(box, pt):
+    x, y, _, w, h = box
+    return abs(pt[0] - x) <= w / 2 and abs(pt[1] - y) <= h / 2
+
+
+def _power_m(text):
+    """'32,5M' / '531K' / '1.2B' → milhões (float) ou None."""
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*([kmb])\b", str(text).lower())  # norm() tiraria a vírgula decimal
+    if not m:
+        return None
+    v = float(m.group(1).replace(",", "."))
+    return v / 1000 if m.group(2) == "k" else v * 1000 if m.group(2) == "b" else v
 
 
 def _hm(text):
@@ -671,19 +702,41 @@ class IdleRewards(Task):
 
 class Resources(Task):
     id, name, icon, group = "resources", "Coleta de Recursos", "⛁", "Escavações & Diárias"
-    description = "Toca nas bolhas de comida, ferro, ouro e caminhão sobre os prédios da base."
+    description = "Toca nas bolhas de comida, ferro, ouro, caminhão e outros recursos sobre os prédios da base; " \
+                  "pode pedir antes o buff do Ministro do Interior."
     default_enabled, default_interval = True, 20.0
     templates = [("bubble_food", "Bolha de comida pronta"), ("bubble_iron", "Bolha de ferro pronta"),
-                 ("bubble_gold", "Bolha de ouro pronta"), ("bubble_truck", "Bolha do caminhão de recursos")]
+                 ("bubble_gold", "Bolha de ouro pronta"), ("bubble_truck", "Bolha do caminhão de recursos"),
+                 ("bubble_other", "Bolha de outro recurso (minério, EXP, guia, parafuso, componentes, drone, petróleo)"),
+                 ("btn_capitol", "Capitólio (onde se pede o cargo/buff)"),
+                 ("minister_interior", "Cargo do Ministro do Interior"), ("btn_apply_buff", "Botão de pedir o buff")]
     fields = [Field("food", "Comida", "bool", True), Field("iron", "Ferro", "bool", True),
               Field("gold", "Ouro", "bool", True), Field("truck", "Caminhão", "bool", True),
+              Field("other", "Outros (minério, EXP, guia, parafuso, componentes, drone, petróleo)", "bool", True),
+              Field("minister", "Pedir antes o buff do Ministro do Interior", "bool", False),
               Field("threshold", "Limiar (bolhas brilham; a cor também é conferida)", "float", 0.65,
                     minimum=0.5, maximum=0.95)]
 
+    def _minister(self, ctx):
+        if ctx.counters.get("minister_buff"):
+            return
+        if not ctx.vision.has("minister_interior"):
+            ctx.warn_once("minister", "⛁ Buff do Ministro: capture 'btn_capitol', 'minister_interior' e "
+                                      "'btn_apply_buff' no Estúdio de imagens")
+            return
+        if ctx.tap("btn_capitol", 2, after=1.2) and ctx.tap("minister_interior", 2, after=1.0) \
+                and ctx.tap("btn_apply_buff", 2, after=1.0):
+            ctx.counters.add("minister_buff")
+            ctx.log("⛁ Buff do Ministro do Interior pedido")
+        ctx.go_home()
+
     def run(self, ctx, s):
         ctx.to_base()
+        if s.get("minister"):
+            self._minister(ctx)
+            ctx.to_base()
         total = 0
-        kinds = [k for k in ("food", "iron", "gold", "truck") if s[k]]
+        kinds = [k for k in ("food", "iron", "gold", "truck", "other") if s.get(k)]
         # um toque pode coletar várias bolhas de uma vez (no jogo, todas): toca UMA e olha de novo,
         # senão os toques seguintes caem em prédios vazios e abrem telas
         for _ in range(12):
@@ -700,16 +753,21 @@ class Resources(Task):
 
 class Alliance(Task):
     id, name, icon, group = "alliance", "Aliança", "⬢", "Escavações & Diárias"
-    description = "Ajuda os membros, coleta presentes da aliança e doa para a tecnologia recomendada."
+    description = "Ajuda os membros, coleta presentes (normais e premium), doa para a tecnologia recomendada e " \
+                  "pega as recompensas da Estrela da Aliança aos domingos."
     default_enabled, default_interval = True, 15.0
     templates = [("btn_alliance_help", "Botão flutuante de ajuda (mãos)"),
                  ("btn_alliance_gifts", "Entrada de presentes da aliança"), ("btn_claim_all", "Coletar tudo"),
+                 ("tab_gifts_premium", "Aba de presentes premium da aliança"),
                  ("btn_alliance_tech", "Entrada de tecnologia da aliança"),
                  ("tech_recommended", "Selo de tecnologia recomendada"),
-                 ("btn_donate", "Botão de doar"), ("btn_donate_diamond", "Botão de doar com diamantes")]
+                 ("btn_donate", "Botão de doar"), ("btn_donate_diamond", "Botão de doar com diamantes"),
+                 ("btn_alliance_star", "Entrada da Estrela da Aliança")]
     fields = [Field("help", "Ajudar membros", "bool", True), Field("gifts", "Coletar presentes", "bool", True),
+              Field("gifts_premium", "Também os presentes premium", "bool", True),
               Field("donate", "Doar tecnologia", "bool", True),
-              Field("diamond_limit", "Doações com diamante por dia", "int", 0, minimum=0, maximum=100)]
+              Field("diamond_limit", "Doações com diamante por dia", "int", 0, minimum=0, maximum=100),
+              Field("star", "Recompensas da Estrela da Aliança (domingo)", "bool", True)]
 
     def run(self, ctx, s):
         ctx.to_base()
@@ -723,6 +781,8 @@ class Alliance(Task):
             return
         if s["gifts"] and ctx.tap("btn_alliance_gifts", 2):
             ctx.tap("btn_claim_all", 2)
+            if s.get("gifts_premium") and ctx.vision.has("tab_gifts_premium") and ctx.tap("tab_gifts_premium", 1.5):
+                ctx.tap("btn_claim_all", 2)
             ctx.back()
         if s["donate"] and ctx.tap("btn_alliance_tech", 2):
             ctx.tap("tech_recommended", 2)
@@ -733,25 +793,82 @@ class Alliance(Task):
                 if not ctx.tap("btn_donate_diamond", 1, after=0.3):
                     break
                 ctx.counters.add("diamond_donations")
+            ctx.back()
+        if s.get("star") and game_weekday(ctx) == 6 and not ctx.counters.get("alliance_star") \
+                and ctx.vision.has("btn_alliance_star") and ctx.tap("btn_alliance_star", 2, after=1.0):
+            n = 0
+            while n < 8 and (ctx.tap("btn_claim_all", 1, after=0.6) or ctx.tap("btn_claim", 1, after=0.6)):
+                n += 1
+            ctx.counters.add("alliance_star")
+            ctx.log("⬢ Estrela da Aliança: recompensas coletadas" if n else "⬢ Estrela da Aliança: nada a coletar")
         ctx.go_home()
 
 
 class Daily(Task):
     id, name, icon, group = "daily", "Diárias: Loja, Trem, VIP", "✉", "Escavações & Diárias"
-    description = "Brinde grátis da loja, curtidas no trem, baú VIP, correio e recompensas de tarefas diárias."
+    description = "Brinde grátis e passes da loja, curtidas no trem, baú VIP, correio, energia grátis e " \
+                  "recompensas de tarefas diárias."
     default_enabled, default_interval = True, 120.0
     templates = [("btn_mall", "Entrada da loja"), ("mall_free", "Brinde grátis da loja"),
+                 ("mall_monthly", "Passe mensal na loja (resgate diário)"),
+                 ("mall_weekly", "Brinde/passe semanal na loja"), ("mall_sovereign", "Passe do Soberano na loja"),
                  ("btn_train", "Entrada do trem"), ("btn_vip", "Entrada do VIP"), ("vip_chest", "Baú VIP grátis"),
                  ("btn_mail", "Correio"), ("btn_daily_tasks", "Tarefas diárias"), ("daily_chest", "Baú de atividade pronto")]
-    fields = [Field("mall", "Brinde da loja", "bool", True), Field("train", "Curtir trem", "bool", True),
+    fields = [Field("mall", "Brinde da loja", "bool", True),
+              Field("mall_monthly", "Passe mensal (se você tiver)", "bool", True),
+              Field("mall_weekly", "Brinde/passe semanal", "bool", True),
+              Field("mall_sovereign", "Passe do Soberano (se você tiver)", "bool", True),
+              Field("train", "Curtir trem", "bool", True),
               Field("vip", "Baú VIP", "bool", True), Field("mail", "Coletar correio", "bool", True),
+              Field("energy", "Energia grátis do dia", "bool", True),
               Field("chests", "Baús de tarefas diárias", "bool", True)]
+    cards = [("Base e recompensas grátis", [
+        Card("Energia grátis", "⚡", "Pega a energia grátis do dia (barra de energia → Usar grátis).", toggle="energy"),
+        Card("Presentes VIP", "♛", "Resgata o baú VIP diário.", toggle="vip"),
+        Card("Correio", "✉", "Abre o correio e resgata tudo.", toggle="mail"),
+        Card("Brindes da loja", "🛒", "Brinde diário e, se você tiver, passe mensal, semanal e do Soberano "
+             "(passe só é resgatado se você tiver; nada é comprado).",
+             toggle="mall", fields=["mall_monthly", "mall_weekly", "mall_sovereign"],
+             summary=lambda s: "brinde" + "".join(f" · {n}" for k, n in (("mall_monthly", "mensal"),
+                                                                       ("mall_weekly", "semanal"),
+                                                                       ("mall_sovereign", "Soberano")) if s[k])),
+        Card("Trem", "🚂", "Curte os trens (grátis).", toggle="train"),
+        Card("Baús das tarefas diárias", "▣", "Resgata tarefas prontas e os baús de atividade.", toggle="chests"),
+    ])]
+
+    def _energy(self, ctx):
+        if ctx.counters.get("free_energy") or not ctx.ai_on():
+            return
+        ctx.to_world()
+        bar = ctx.ai("stamina_bar", ctx.frame())
+        if not bar:
+            return
+        ctx.tap_xy(bar[0][0], bar[0][1], spread=2)
+        ctx.sleep(1.0)
+        hit = ctx.seen("stamina_use_free", 0.5, ctx.frame())
+        if hit:
+            ctx.tap_xy(hit[0], hit[1], spread=2)
+            ctx.sleep(0.8)
+            ctx.counters.add("free_energy")
+            ctx.log("⚡ Energia grátis do dia coletada")
+        else:
+            ctx.counters.add("free_energy")  # já pega hoje: não abre de novo até o reset
+        ctx.go_home()
 
     def run(self, ctx, s):
+        if s.get("energy"):
+            self._energy(ctx)
         ctx.to_base()
-        if s["mall"] and ctx.counters.get("mall_free") == 0 and ctx.tap("btn_mall", 2):
-            if ctx.tap("mall_free", 2):
+        if s["mall"] and ctx.tap("btn_mall", 2):
+            if ctx.counters.get("mall_free") == 0 and ctx.tap("mall_free", 2):
                 ctx.counters.add("mall_free")
+            for k, label in (("mall_monthly", "passe mensal"), ("mall_weekly", "semanal"),
+                             ("mall_sovereign", "passe do Soberano")):
+                if s.get(k) and not ctx.counters.get(k) and ctx.vision.has(k) and ctx.tap(k, 1.5, after=1.0):
+                    if ctx.tap("btn_claim", 1.5) or ctx.tap("btn_collect", 1.0):
+                        ctx.log(f"🛒 Loja: {label} resgatado")
+                    ctx.counters.add(k)
+                    ctx.press_back()
             ctx.go_home()
         if s["train"] and ctx.tap("btn_train", 2):
             while ctx.tap("btn_like", 1, after=0.3):
@@ -773,16 +890,244 @@ class Daily(Task):
             ctx.go_home()
 
 
+SECRET_MODES = ["só coletar recompensas", "coletar + enviar novas"]
+RARITIES = ["UR", "SSR", "SR"]
+
+
 class SecretSquad(Task):
-    id, name, icon, group = "secret_squad", "Esquadrão Secreto", "✦", "Escavações & Diárias"
-    description = "Coleta missões concluídas e despacha novas a partir do nível mínimo escolhido."
+    id, name, icon, group = "secret_squad", "Missões Secretas", "✦", "Escavações & Diárias"
+    description = "Posto de Comando Secreto: coleta as missões prontas, envia novas pela raridade, troca para o " \
+                  "envio Mega no fim, assiste os aliados até 5/5 e abre os baús do Tesouro Escondido."
     default_enabled, default_interval = True, 30.0
     templates = [("btn_secret_squad", "Entrada do esquadrão secreto"), ("btn_quick_deploy", "Escalar automático")] + \
                 [(f"mission_{l}", f"Selo de missão nível {l}") for l in LEVELS]
-    fields = [Field("claim_only", "Apenas coletar", "bool", False),
-              Field("min_level", "Nível mínimo da missão", "choice", "SSR", options=LEVELS)]
+    fields = [Field("mode", "O que fazer", "choice", SECRET_MODES[1], options=SECRET_MODES),
+              Field("ur", "Enviar UR", "bool", True), Field("ssr", "Enviar SSR", "bool", True),
+              Field("sr", "Enviar SR", "bool", False),
+              Field("mega_left", "Envio Mega quando restarem (tarefas; 0 = nunca)", "int", 4, minimum=0, maximum=20),
+              Field("refresh_max", "Atualizar a lista grátis até (vezes)", "int", 1, minimum=0, maximum=10),
+              Field("alt_days", "Outro nível nestes dias (ex.: sab, dom)", "text", ""),
+              Field("alt_level", "…nível mínimo nesses dias", "choice", "SR", options=RARITIES),
+              Field("star_days", "Missões com estrela só nestes dias (vazio = qualquer dia)", "text", ""),
+              Field("ally", "Assistir missões dos aliados (até 5/5)", "bool", True),
+              Field("ally_min", "…raridade mínima", "choice", "SR", options=RARITIES),
+              Field("chests", "Baús do Tesouro Escondido / Aventura", "bool", True),
+              Field("ghost", "Operações Fantasmas", "bool", False),
+              Field("ghost_days", "…nos dias", "text", "qui"),
+              Field("claim_only", "Apenas coletar (versões antigas)", "bool", False),
+              Field("min_level", "Nível mínimo (sem IA)", "choice", "SSR", options=LEVELS)]
+    cards = [
+        ("Missões secretas", [
+            Card("Missões secretas", "✦", "Coleta as prontas e envia novas das raridades marcadas.",
+                 fields=["mode", "ur", "ssr", "sr"],
+                 summary=lambda s: s["mode"] if s["mode"] == SECRET_MODES[0] else
+                 "envia " + ("/".join(r for r in RARITIES if s[r.lower()]) or "nada")),
+            Card("Envio Mega", "⏩", "Normal, depois Mega quando restarem poucas tarefas. Nunca troca para Mega se "
+                 "ainda houver UR para enviar.", fields=["mega_left", "refresh_max"],
+                 summary=lambda s: (f"Mega com {s['mega_left']} restando" if int(s["mega_left"]) else "sem Mega")
+                 + (f" · atualiza {s['refresh_max']}x" if int(s["refresh_max"]) else "")),
+            Card("Outro nível em alguns dias", "📅", "Nesses dias (do jogo) envia a partir de outro nível.",
+                 fields=["alt_days", "alt_level"],
+                 summary=lambda s: f"{s['alt_days']}: a partir de {s['alt_level']}" if s["alt_days"].strip()
+                 else "desligado"),
+            Card("Missões com estrela", "★", "Só envia missões com estrela/especiais nos dias escolhidos.",
+                 fields=["star_days"], summary=lambda s: s["star_days"] or "qualquer dia"),
+        ]),
+        ("Aliados e baús", [
+            Card("Missões dos aliados", "🤝", "Aba dos aliados → Assistir (de cima para baixo) até a cota 5/5.",
+                 toggle="ally", fields=["ally_min"], summary="a partir de {ally_min}"),
+            Card("Baús do Tesouro", "▣", "Abre os baús do Tesouro Escondido e de Aventura quando prontos.",
+                 toggle="chests"),
+            Card("Operações Fantasmas", "👻", "Envia as missões das Operações Fantasmas nos dias escolhidos.",
+                 toggle="ghost", fields=["ghost_days"], summary="dias: {ghost_days}"),
+        ]),
+    ]
+
+    # --- peças (classes da IA do Posto Secreto) -------------------------
+    @staticmethod
+    def _hit(ctx, cls, conf=0.4, f=None):
+        d = ctx.dets(f, conf).get(cls, [])
+        return d[0] if d else None
+
+    def _tap_cls(self, ctx, cls, conf=0.4, after=1.0):
+        b = self._hit(ctx, cls, conf, ctx.frame())
+        if not b:
+            return False
+        ctx.tap_xy(b[0], b[1], spread=2)
+        ctx.sleep(after)
+        return True
+
+    def _open(self, ctx):
+        if ctx.go_home() is None:
+            return False
+        icon = ctx.ai_wait("btn_secret_squad", 3)
+        if not icon:
+            return False
+        ctx.tap_xy(icon[0], icon[1], spread=2)
+        ctx.sleep(1.5)
+        f = ctx.frame()
+        return bool(self._hit(ctx, "secret_tab_perso", 0.35, f) or self._hit(ctx, "secret_tab_perso_selected", 0.35, f)
+                    or self._hit(ctx, "secret_task_card", 0.35, f))
+
+    def _close_reward(self, ctx):
+        for _ in range(3):
+            f = ctx.frame()
+            if self._hit(ctx, "secret_task_card", 0.35, f) or self._hit(ctx, "secret_tab_perso_selected", 0.35, f):
+                return
+            hit = ctx.seen("tap_close_text", 0.4, f)
+            if hit:
+                ctx.tap_xy(hit[0], hit[1], spread=2)
+            else:
+                ctx.key("esc")
+            ctx.sleep(0.7)
+
+    def _collect(self, ctx):
+        n = 0
+        while n < 6 and self._tap_cls(ctx, "secret_collect_btn", 0.45, after=1.5):
+            n += 1
+            self._close_reward(ctx)
+        if n:
+            ctx.counters.add("secret_collected", n)
+            ctx.log(f"✦ {n} missão(ões) secreta(s) coletada(s)")
+        return n
+
+    def _cards(self, ctx, f):
+        d = ctx.dets(f, 0.3)
+        out = []
+        for c in d.get("secret_task_card", []):
+            rar = next((r for r in RARITIES for b in d.get(f"secret_rarity_{r.lower()}", []) if _box_has(c, b)), None)
+            go = next((b for b in d.get("secret_go_btn", []) if _box_has(c, b)), None)
+            red = sum(1 for b in d.get("secret_star_red", []) if _box_has(c, b))
+            yel = sum(1 for b in d.get("secret_star_yellow", []) if _box_has(c, b))
+            special = any(_box_has(c, b) for b in d.get("secret_special_badge", []))
+            out.append({"box": c, "rar": rar, "go": go, "level": 5 + red if red else yel,
+                        "star": special or red > 0})
+        return out
+
+    def _allowed(self, ctx, s):
+        if str(s.get("alt_days", "")).strip() and day_in(ctx, s["alt_days"]):
+            return set(RARITIES[:RARITIES.index(s.get("alt_level", "SR")) + 1])
+        return {r for r in RARITIES if s.get(r.lower())}
+
+    def _mega(self, ctx):
+        """Normal → Mega: 'Mega envio' → 'Executar agora'. Popup de custo (com Cancelar) → cancela."""
+        if not (self._tap_cls(ctx, "secret_mode_mega", 0.4) or self._hit(ctx, "secret_mega_deploy_btn", 0.4)):
+            return False
+        if not self._tap_cls(ctx, "secret_mega_deploy_btn", 0.4, after=1.2):
+            return False
+        self._tap_cls(ctx, "secret_mega_execute_btn", 0.4, after=1.2)
+        f = ctx.frame()
+        if ctx.seen("confirm_popup", 0.5, f) and ctx.seen("cancel_popup", 0.4, f):
+            ctx.tap("btn_exit_cancel", 1.0)  # custa algo: não gasta
+            ctx.log("✦ Envio Mega pede bilhetes/diamantes — cancelado")
+            return False
+        ctx.counters.add("secret_mega")
+        ctx.log("✦ Envio Mega feito")
+        self._tap_cls(ctx, "secret_mode_normal", 0.4)
+        return True
+
+    def _deploy(self, ctx, s, every=False):
+        allowed = set(RARITIES) if every else self._allowed(ctx, s)
+        star_ok = every or not str(s.get("star_days", "")).strip() or day_in(ctx, s["star_days"])
+        refreshes, sent = 0, 0
+        order = {r: i for i, r in enumerate(RARITIES)}
+        for _ in range(10):
+            f = ctx.frame()
+            cards = self._cards(ctx, f)
+            open_cards = [c for c in cards if c["go"]]
+            ok = [c for c in open_cards if c["rar"] in allowed and (star_ok or not c["star"])]
+            mega_left = int(s.get("mega_left", 0) or 0)
+            if not every and mega_left and open_cards and len(open_cards) <= mega_left \
+                    and not any(c["rar"] == "UR" for c in ok) and self._mega(ctx):
+                break
+            if ok:
+                c = min(ok, key=lambda c: (order.get(c["rar"], 9), -c["level"]))
+                ctx.tap_xy(c["go"][0], c["go"][1], spread=2)
+                ctx.sleep(1.2)
+                self._tap_cls(ctx, "secret_quick_deploy_btn", 0.4, after=0.8)
+                f = ctx.frame()
+                if self._hit(ctx, "secret_deploy_btn_off", 0.45, f) and not self._hit(ctx, "secret_deploy_btn", 0.5, f):
+                    ctx.log("✦ Sem heróis livres para a missão")
+                    ctx.press_back()
+                    break
+                if self._tap_cls(ctx, "secret_deploy_btn", 0.45, after=1.2):
+                    sent += 1
+                    ctx.counters.add("secret_missions")
+                    ctx.log(f"✦ Missão {c['rar'] or ''} nível {c['level']} enviada")
+                    continue
+                ctx.press_back()
+                break
+            if refreshes < int(s.get("refresh_max", 0) or 0) and self._hit(ctx, "secret_refresh_btn", 0.45, f):
+                self._tap_cls(ctx, "secret_refresh_btn", 0.45, after=1.2)
+                refreshes += 1
+                f = ctx.frame()
+                if ctx.seen("confirm_popup", 0.5, f) and ctx.seen("cancel_popup", 0.4, f):
+                    ctx.tap("btn_exit_cancel", 1.0)  # atualizar custaria bilhete/diamante
+                    break
+                continue
+            break
+        return sent
+
+    def _ally(self, ctx, s):
+        if not (self._tap_cls(ctx, "secret_tab_ally", 0.4) or self._hit(ctx, "secret_tab_ally_selected", 0.4)):
+            return 0
+        order = {r: i for i, r in enumerate(RARITIES)}
+        limit = order.get(s.get("ally_min", "SR"), 2)
+        n = 0
+        for _ in range(5):
+            f = ctx.frame()
+            q = self._hit(ctx, "secret_quota_ally", 0.35, f) or self._hit(ctx, "secret_quota_ally_selected", 0.35, f)
+            if q and ctx.ocr_on():
+                h, w = f.shape[:2]
+                txt = ctx.ocr.text(f, (max(0, (q[0] - q[3]) / w), max(0, (q[1] - q[4]) / h), 2 * q[3] / w,
+                                       2 * q[4] / h))
+                m = re.search(r"(\d)\s*[/7]\s*5", txt)
+                if m and int(m.group(1)) >= 5:
+                    break
+            cards = self._cards(ctx, f)
+            btns = sorted(ctx.dets(f, 0.4).get("secret_assist_btn", []), key=lambda b: b[1])
+            pick = None
+            for b in btns:
+                card = next((c for c in cards if _box_has(c["box"], b)), None)
+                if card is None or order.get(card["rar"], 0) <= limit:
+                    pick = b
+                    break
+            if not pick:
+                break
+            ctx.tap_xy(pick[0], pick[1], spread=2)
+            ctx.sleep(1.5)
+            self._close_reward(ctx)
+            n += 1
+        if n:
+            ctx.counters.add("secret_assists", n)
+            ctx.log(f"🤝 {n} missão(ões) de aliado assistida(s)")
+        self._tap_cls(ctx, "secret_tab_perso", 0.4)
+        return n
+
+    def _tab(self, ctx, cls):
+        return self._tap_cls(ctx, cls, 0.4, after=1.2) or bool(self._hit(ctx, cls + "_selected", 0.4))
 
     def run(self, ctx, s):
+        if not ctx.ai_on():
+            return self._run_templates(ctx, s)
+        if not self._open(ctx):
+            ctx.go_home()
+            return
+        self._collect(ctx)
+        if s.get("mode") != SECRET_MODES[0] and not s.get("claim_only"):
+            self._deploy(ctx, s)
+        if s.get("ally"):
+            self._ally(ctx, s)
+        if s.get("chests") and self._tab(ctx, "secret_post_tab_treasure"):
+            self._collect(ctx)
+            self._tab(ctx, "secret_post_tab_tasks")
+        if s.get("ghost") and day_in(ctx, s.get("ghost_days", "qui")) and self._tab(ctx, "secret_post_tab_ghost"):
+            self._collect(ctx)
+            self._deploy(ctx, s, every=True)
+            self._tab(ctx, "secret_post_tab_tasks")
+        ctx.go_home()
+
+    def _run_templates(self, ctx, s):
         ctx.to_base()
         if not ctx.tap("btn_secret_squad", 3):
             return
@@ -790,7 +1135,7 @@ class SecretSquad(Task):
         while n < 6 and ctx.tap("btn_claim", 1, after=0.8):
             ctx.back()
             n += 1
-        if not s["claim_only"]:
+        if s.get("mode") != SECRET_MODES[0] and not s["claim_only"]:
             for lvl in LEVELS[:LEVELS.index(s["min_level"]) + 1]:
                 for x, y in ctx.find_all(f"mission_{lvl}", 0.85):
                     ctx.tap_xy(x, y)
@@ -803,16 +1148,89 @@ class SecretSquad(Task):
         ctx.go_home()
 
 
+TRUCK_MODES = ["um por um", "Mega (só Rena)"]
+
+
 class Trucks(Task):
     id, name, icon, group = "trucks", "Caminhões", "⛟", "Escavações & Diárias"
-    description = "Coleta caminhões que chegaram e envia novos, renovando até achar o nível desejado."
+    description = "Coleta caminhões que chegaram, envia novos renovando até o nível desejado e, se quiser, saqueia " \
+                  "caminhões de outros com poder até o limite."
     default_interval = 30.0
     templates = [("btn_trucks", "Entrada dos caminhões/escolta"), ("btn_truck_claim", "Coletar caminhão"),
-                 ("btn_truck_send", "Enviar caminhão"), ("btn_truck_refresh", "Renovar caminhão")] + \
+                 ("btn_truck_send", "Enviar caminhão"), ("btn_truck_refresh", "Renovar caminhão"),
+                 ("btn_truck_mega", "Envio Mega de caminhões (Rena)"),
+                 ("btn_plunder_list", "Lista de pilhagem (caminhões para saquear)")] + \
                 [(f"truck_{l}", f"Caminhão nível {l}") for l in LEVELS[:3]]
     fields = [Field("send", "Enviar caminhões", "bool", True),
+              Field("send_mode", "Como enviar", "choice", TRUCK_MODES[0], options=TRUCK_MODES),
               Field("level", "Nível mínimo", "choice", "SSR", options=LEVELS[:3]),
-              Field("max_refresh", "Renovações gratuitas máx.", "int", 3, minimum=0, maximum=20)]
+              Field("max_refresh", "Renovações gratuitas máx.", "int", 3, minimum=0, maximum=20),
+              Field("send_days", "Só enviar nestes dias (vazio = todo dia)", "text", ""),
+              Field("alt_days", "Outro nível nestes dias (ex.: sab, dom)", "text", ""),
+              Field("alt_level", "…nível mínimo nesses dias", "choice", "SR", options=LEVELS[:3]),
+              Field("plunder", "Saquear caminhões", "bool", False),
+              Field("plunder_level", "Nível alvo (mínimo)", "choice", "UR", options=LEVELS[:3]),
+              Field("plunder_power", "Poder máximo do inimigo (milhões; 0 = sem limite)", "float", 0.0, minimum=0,
+                    maximum=100000),
+              Field("plunder_count", "Saques por rodada", "int", 2, minimum=1, maximum=10),
+              Field("plunder_daily", "Saques por dia (0 = ∞)", "int", 4, minimum=0, maximum=50)]
+    cards = [
+        ("Enviar", [
+            Card("Enviar caminhões", "⛟", "Um por um, ou Mega (todos os Rena de uma vez; se não der, um por um). "
+                 "Renova de graça até o nível mínimo.", toggle="send", fields=["send_mode", "level", "max_refresh"],
+                 summary="{send_mode} · {level}+ · renova {max_refresh}x"),
+            Card("Agenda semanal", "📅", "Dias do jogo em que envia, e outro nível mínimo em dias específicos.",
+                 fields=["send_days", "alt_days", "alt_level"],
+                 summary=lambda s: (s["send_days"] or "todo dia") + (f" · {s['alt_days']}: {s['alt_level']}+"
+                                                                     if s["alt_days"].strip() else "")),
+        ]),
+        ("Saquear", [
+            Card("Saquear caminhões", "⚔", "Abre a lista de pilhagem e ataca caminhões do nível escolhido com poder "
+                 "até o limite (lido na linha). Desligado por padrão: ataque a outros jogadores.", toggle="plunder",
+                 fields=["plunder_level", "plunder_power", "plunder_count", "plunder_daily"],
+                 summary=lambda s: f"{s['plunder_level']}+ · poder ≤ {float(s['plunder_power']):g}M"
+                 if float(s["plunder_power"]) else f"{s['plunder_level']}+ · qualquer poder"),
+        ]),
+    ]
+
+    def _plunder(self, ctx, s):
+        daily = int(s.get("plunder_daily", 0) or 0)
+        if daily and ctx.counters.get("plunders") >= daily:
+            return
+        if not ctx.vision.has("btn_plunder_list") or not ctx.tap("btn_plunder_list", 2, after=1.2):
+            ctx.warn_once("plunder", "⛟ Saquear: capture 'btn_plunder_list' (lista de pilhagem) no Estúdio")
+            return
+        allowed = LEVELS[:LEVELS.index(s.get("plunder_level", "UR")) + 1]
+        maxp = float(s.get("plunder_power", 0) or 0)
+        done = 0
+        for _ in range(int(s.get("plunder_count", 2))):
+            f = ctx.frame()
+            rows = sorted(ctx.dets(f, 0.45).get("plunder_btn", []), key=lambda b: b[1])
+            target = None
+            for b in rows:
+                h, w = f.shape[:2]
+                t = ctx.ocr.text(f, (0.0, max(0.0, (b[1] - b[4]) / h), max(0.05, b[0] / w), 2 * b[4] / h)) \
+                    if ctx.ocr_on() else ""
+                lvl_ok = any(re.search(rf"\b{l}\b", t.upper()) for l in allowed) or not ctx.ocr_on()
+                pw = _power_m(t)
+                if lvl_ok and (not maxp or (pw is not None and pw <= maxp)):
+                    target = b
+                    break
+            if not target:
+                break
+            ctx.tap_xy(target[0], target[1], spread=2)
+            ctx.sleep(1.2)
+            if not march(ctx, SQUADS):
+                ctx.press_back()
+                break
+            done += 1
+            ctx.counters.add("plunders")
+            ctx.log("⛟ Caminhão saqueado")
+            if daily and ctx.counters.get("plunders") >= daily:
+                break
+            if not ctx.tap("btn_plunder_list", 2, after=1.2):
+                break
+        ctx.press_back()
 
     def run(self, ctx, s):
         ctx.to_base()
@@ -821,16 +1239,26 @@ class Trucks(Task):
         while ctx.tap("btn_truck_claim", 1, after=0.8):
             ctx.back()
             ctx.counters.add("trucks_claimed")
-        if s["send"] and ctx.tap("btn_truck_send", 2):
-            allowed = LEVELS[:LEVELS.index(s["level"]) + 1]
-            for _ in range(int(s["max_refresh"]) + 1):
-                if any(ctx.vision.has(f"truck_{l}") and ctx.exists(f"truck_{l}", 0.86) for l in allowed):
-                    break
-                if not ctx.tap("btn_truck_refresh", 1.5, after=1.0):
-                    break
-            if ctx.tap("btn_depart", 2):
+        days_ok = not str(s.get("send_days", "")).strip() or day_in(ctx, s["send_days"])
+        if s["send"] and days_ok:
+            lvl = s["alt_level"] if str(s.get("alt_days", "")).strip() and day_in(ctx, s["alt_days"]) else s["level"]
+            mega = s.get("send_mode") == TRUCK_MODES[1] and ctx.vision.has("btn_truck_mega") \
+                and ctx.tap("btn_truck_mega", 2, after=1.0)
+            if mega and (ctx.tap("btn_depart", 2) or ctx.tap("btn_confirm", 1.5)):
                 ctx.counters.add("trucks_sent")
-                ctx.log("⛟ Caminhão enviado")
+                ctx.log("⛟ Caminhões enviados (Mega)")
+            elif ctx.tap("btn_truck_send", 2):
+                allowed = LEVELS[:LEVELS.index(lvl) + 1]
+                for _ in range(int(s["max_refresh"]) + 1):
+                    if any(ctx.vision.has(f"truck_{l}") and ctx.exists(f"truck_{l}", 0.86) for l in allowed):
+                        break
+                    if not ctx.tap("btn_truck_refresh", 1.5, after=1.0):
+                        break
+                if ctx.tap("btn_depart", 2):
+                    ctx.counters.add("trucks_sent")
+                    ctx.log("⛟ Caminhão enviado")
+        if s.get("plunder"):
+            self._plunder(ctx, s)
         ctx.go_home()
 
 
@@ -1076,11 +1504,12 @@ class AutoJoin(Task):
         h, w = f.shape[:2]
         x, y = slot
         region = (max(0.0, x / w - 0.45), max(0.0, y / h - 0.07), min(0.45, x / w), 0.14)
-        t = norm(ctx.ocr.text(f, region))
+        raw = ctx.ocr.text(f, region)
+        t = norm(raw)  # norm() tira a barra: "2/5" → "25"; a contagem é lida no texto cru
         info["text"] = t
         m = re.search(r"\b(?:nv|lv|nivel)\s*\.?\s*(\d{1,3})\b", t)
         info["lvl"] = int(m.group(1)) if m else 0
-        m = re.search(r"\b(\d)\s*/\s*(\d)\b", t)
+        m = re.search(r"\b(\d)\s*/\s*(\d)\b", raw)
         if m and 0 < int(m.group(2)) <= 9:
             info["joined"] = int(m.group(1))
         m = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b", t)
@@ -1552,37 +1981,95 @@ class Hunt(Task):
 
 class MarshalGuard(Task):
     id, name, icon, group = "marshal_guard", "Guarda do Marechal", "♜", "Rallies & Eventos"
-    description = "No evento do Marechal: um esquadrão inicia rallies e os outros entram nos rallies da aliança."
+    description = "No Exercício da Aliança (Marechal): um esquadrão inicia mobilizações e os outros entram; fica até " \
+                  "o fim do exercício (30 min) e volta à tarefa principal."
     default_interval = 2.0
+    max_minutes = 35
     templates = [("btn_marshal_event", "Entrada/ícone do evento Guarda do Marechal"),
                  ("marshal_target", "O Marechal no mapa (ou o botão de ir até ele)")]
-    fields = [Field("start", "Iniciar rallies", "bool", True),
+    fields = [Field("start", "Iniciar mobilizações", "bool", True),
               Field("start_squad", "Esquadrão que inicia", "choice", "1", options=SQUADS),
-              Field("join", "Entrar nos rallies da aliança", "bool", True),
+              Field("join", "Entrar nas mobilizações da aliança", "bool", True),
               Field("join_squads", "Esquadrões que entram", "text", "2,3,4"),
-              Field("daily_limit", "Limite de rallies/dia (0 = ∞)", "int", 0, minimum=0, maximum=999)]
+              Field("join_pos", "Posição de entrada", "choice", "1+", options=POSITIONS, hint=POSITION_HELP),
+              Field("daily_limit", "Limitar entradas diárias a (0 = ∞)", "int", 0, minimum=0, maximum=999),
+              Field("stay_min", "Ficar no máximo (min)", "int", 30, minimum=1, maximum=60),
+              Field("check_digs", "Verificar escavações durante o exercício", "bool", True),
+              Field("heal", "Curar tropas", "bool", True),
+              Field("heal_limit", "…limitar tropas curadas por vez (0 = tudo)", "int", 0, minimum=0, maximum=100000)]
+    cards = [
+        ("O que fazer", [
+            Card("Iniciar mobilizações", "⚑", "Dica: um esquadrão com 1 herói e sem tropas (mobilização que falhar "
+                 "não custa tropas).", toggle="start", fields=["start_squad"], summary="esquadrão {start_squad}"),
+            Card("Entrar em mobilizações", "⚔", "Use os esquadrões mais fortes: as recompensas dependem do dano. "
+                 "Depois de algumas entradas o dano chega ao máximo — limite as entradas diárias.", toggle="join",
+                 fields=["join_squads", "join_pos", "daily_limit"],
+                 summary=lambda s: f"esq. {s['join_squads']} · posição {s['join_pos']}"
+                 + (f" · {s['daily_limit']}/dia" if int(s["daily_limit"]) else "")),
+        ]),
+        ("Durante o exercício", [
+            Card("Verificar escavações", "⛏", "Após cada entrada e com os esquadrões fora.", toggle="check_digs"),
+            Card("Curar tropas", "✚", "Cura os feridos, com limite por vez se quiser.", toggle="heal",
+                 fields=["heal_limit"],
+                 summary=lambda s: (f"até {s['heal_limit']} por vez" if int(s["heal_limit"]) else "tudo")
+                 if s["heal"] else "não cura"),
+            Card("Quando sair", "⏱", "O exercício dura 30 min; sai assim que ele termina.", fields=["stay_min"],
+                 summary="no máximo {stay_min} min"),
+        ]),
+    ]
 
-    def run(self, ctx, s):
+    def _pass(self, ctx, s):
+        """Uma passada: inicia (se der) e entra. True = o Marechal ainda está aí."""
         lim = int(s["daily_limit"])
-        if lim and ctx.counters.get("marshal") >= lim:
-            return
-        if s["start"]:
+        found = False
+        if s["start"] and not (lim and ctx.counters.get("marshal") >= lim):
             ctx.to_world()
             if ctx.tap("btn_marshal_event", 2, after=1.5) or ctx.tap("marshal_target", 2, after=1.5):
+                found = True
                 ctx.tap_rel(0.5, 0.5)
                 ctx.sleep(0.8)
                 if ctx.tap("btn_rally", 2):
                     ctx.tap("btn_rally_confirm", 1.5)
                     if march(ctx, [s["start_squad"]]):
                         ctx.counters.add("marshal")
-                        ctx.log(f"♜ Rally do Marechal iniciado (esq. {s['start_squad']})")
+                        ctx.log(f"♜ Mobilização do Marechal iniciada (esq. {s['start_squad']})")
             ctx.go_home()
-        if s["join"]:
+        if s["join"] and not (lim and ctx.counters.get("join_marshal") >= lim):
             joiner = AutoJoin()
             js = dict(ctx.e.cfg.task(joiner.id, joiner.defaults()))
             js.update({f"boss_{k}": k == "marshal" for k, _ in RALLY_BOSSES})
-            js["squad_order"] = s["join_squads"]
-            joiner.run(ctx, js)
+            js.update({"any_boss": False, "squad_order": s["join_squads"], "check_digs": False, "heal_after": 0,
+                       "daily_limit": lim})
+            wanted = [q for q in parse_list(s["join_squads"]) if q in SQUADS]
+            for q in SQUADS:
+                js[f"sq{q}_on"] = q in wanted
+                js[f"sq{q}_min"], js[f"sq{q}_max"] = 0, 0
+                js[f"sq{q}_pos"] = s.get("join_pos", "1+")
+            if joiner.run(ctx, js):
+                found = True
+        if s.get("check_digs", True):
+            check_digs(ctx)
+        return found
+
+    def run(self, ctx, s):
+        end = time.time() + int(s.get("stay_min", 30)) * 60
+        idle, seen = 0, False
+        while time.time() < end:
+            if self._pass(ctx, s):
+                idle, seen = 0, True
+            else:
+                idle += 1
+                if idle >= (2 if seen else 1):  # sem Marechal = exercício acabou (ou nem começou)
+                    break
+            ctx.sleep(20)
+        if s.get("heal"):
+            n = int(s.get("heal_limit", 0) or 0)
+            heal_troops(ctx, n, n)
+        ctx.go_home()
+
+
+HERO_MODES = ["bilhetes de recrutamento", "EXP de herói"]
+DRONE_TARGETS = ["melhorar o drone", "Elite da Destruição", "Zumbis"]
 
 
 class ArmsRace(Task):
@@ -1592,7 +2079,8 @@ class ArmsRace(Task):
     templates = [("btn_arms_race", "Entrada da Corrida Armamentista (ícone de eventos)"),
                  ("btn_train_troops", "Treinar tropas (no quartel)"), ("btn_barracks", "Quartel"),
                  ("btn_recruit", "Recrutar heróis"), ("btn_drone", "Tela do drone"), ("btn_drone_up", "Melhorar drone"),
-                 ("btn_research", "Laboratório / pesquisa"), ("btn_speedup", "Usar aceleração")]
+                 ("btn_research", "Laboratório / pesquisa"), ("btn_speedup", "Usar aceleração"),
+                 ("btn_hero_levelup", "Botão de subir nível do herói (EXP)")]
     fields = [Field("units", "Tropas: treinar", "bool", True), Field("heroes", "Heróis: recrutar", "bool", False),
               Field("drone", "Drone: melhorar", "bool", True), Field("tech", "Pesquisa: acelerar", "bool", False),
               Field("city", "Construção: acelerar", "bool", False),
@@ -1603,12 +2091,26 @@ class ArmsRace(Task):
               Field("target", "Meta de baús por faixa (depois disso não insiste)", "choice", "3",
                     options=["1", "2", "3", "máx"]),
               Field("stop_full", "Parar quando já tiver 18/18 baús do dia", "bool", True),
-              Field("speedups", "Acelerações por rodada (construção/pesquisa)", "int", 1, minimum=0, maximum=20)]
+              Field("speedups", "Acelerações por rodada (construção/pesquisa)", "int", 1, minimum=0, maximum=20),
+              Field("hero_mode", "Heróis: como ganhar os pontos", "choice", HERO_MODES[0], options=HERO_MODES),
+              Field("hero_name", "…herói que recebe a EXP (nome, como no jogo)", "text", ""),
+              Field("hero_ups", "…melhorias por rodada", "int", 3, minimum=1, maximum=30),
+              Field("drone_target", "Drone: o que fazer", "choice", DRONE_TARGETS[0], options=DRONE_TARGETS),
+              Field("drone_level", "…nível da Elite / do zumbi", "int", 30, minimum=1, maximum=100),
+              Field("drone_attacks", "…ataques por rodada", "int", 3, minimum=1, maximum=20),
+              Field("drone_squads", "…esquadrões", "text", "1,2,3")]
     cards = [
         ("Quais temas fazer", [
             Card("Tropas", "⚔", "Treina tropas no quartel no tema de Unidades.", toggle="units"),
-            Card("Heróis", "★", "Recruta heróis no tema de Heróis.", toggle="heroes"),
-            Card("Drone", "✈", "Melhora o drone no tema de Drone.", toggle="drone"),
+            Card("Heróis", "★", "Pontos com bilhetes de recrutamento, ou EXP de herói para o herói escolhido.",
+                 toggle="heroes", fields=["hero_mode", "hero_name", "hero_ups"],
+                 summary=lambda s: s["hero_mode"] + (f" · {s['hero_name']}" if s["hero_mode"] == HERO_MODES[1]
+                                                     and s["hero_name"].strip() else "")),
+            Card("Drone", "✈", "Melhora o drone, ou ataca Elites da Destruição / zumbis com energia (usa a página "
+                 "Zumbis Dourados, com o nível e os esquadrões daqui).", toggle="drone",
+                 fields=["drone_target", "drone_level", "drone_attacks", "drone_squads"],
+                 summary=lambda s: s["drone_target"] + ("" if s["drone_target"] == DRONE_TARGETS[0]
+                                                        else f" Nv.{s['drone_level']}")),
             Card("Pesquisa", "⚗", "Usa aceleração na pesquisa no tema de Tecnologia.", toggle="tech"),
             Card("Construção", "⚒", "Usa aceleração na construção no tema de Cidade.", toggle="city"),
             Card("Abates", "☠", "Roda Zumbis/Rally no tema de Abates.", toggle="kill"),
@@ -1695,6 +2197,42 @@ class ArmsRace(Task):
                     break  # saiu do painel: não toca mais às cegas
         return False
 
+    def _heroes(self, ctx, s):
+        if s.get("hero_mode") == HERO_MODES[1] and str(s.get("hero_name", "")).strip():
+            if not ctx.tap("btn_heroes", 2, after=1.2):
+                return
+            if not ctx.tap_text([s["hero_name"].strip()], 2, after=1.2):
+                ctx.log(f"🏁 Herói '{s['hero_name']}' não achado na lista", "warn")
+                return
+            ups = 0
+            for _ in range(int(s.get("hero_ups", 3))):
+                if not ctx.tap("btn_hero_levelup", 1.2, after=0.5):
+                    break
+                ups += 1
+            ctx.log(f"🏁 EXP de herói: {ups} melhoria(s) em {s['hero_name']}" if ups else
+                    "🏁 Sem botão de melhorar (capture 'btn_hero_levelup' ou falta EXP)")
+            return
+        if ctx.tap("btn_recruit", 2):
+            ctx.tap("btn_confirm", 1.5)
+
+    def _drone_fight(self, ctx, s):
+        hunt = ctx.e.task_by_id("hunt")
+        if not hunt:
+            return
+        hs = dict(ctx.e.cfg.task(hunt.id, hunt.defaults()))
+        elite = s.get("drone_target") == DRONE_TARGETS[1]
+        squads = [q for q in parse_list(s.get("drone_squads")) if q in SQUADS] or ["1"]
+        lvl = int(s.get("drone_level", 30))
+        hs.update({"mode": "doom" if elite else "zombie", "level": lvl, "climb": False, "join": False,
+                   "hunt_on": not elite, "rally": elite, "max_attacks": int(s.get("drone_attacks", 3)),
+                   "energy_budget": 0, "on_finish": HUNT_FINISH[0], "daily_limit": 0})
+        for q in SQUADS:
+            hs[f"hunt_sq{q}"] = q in squads and not elite
+            hs[f"rally_sq{q}"] = q in squads and elite
+            hs[f"rally_sq{q}_min"], hs[f"rally_sq{q}_max"] = lvl, lvl
+        ctx.log("🏁 Drone: " + ("mobilizações contra a Elite" if elite else "zumbis") + f" Nv.{lvl}")
+        hunt.run(ctx, hs)
+
     def run(self, ctx, s):
         n, a, b, left, day = self.stage(s.get("reset_time", "23:00"))
         st_key = f"arms_chests_{day}_{n}"  # baús desta faixa, deste dia
@@ -1719,8 +2257,10 @@ class ArmsRace(Task):
         ctx.to_base()
         if th == "units" and ctx.tap("btn_barracks", 2):
             ctx.tap("btn_train_troops", 2) and ctx.tap("btn_confirm", 1.5)
-        elif th == "heroes" and ctx.tap("btn_recruit", 2):
-            ctx.tap("btn_confirm", 1.5)
+        elif th == "heroes":
+            self._heroes(ctx, s)
+        elif th == "drone" and s.get("drone_target", DRONE_TARGETS[0]) != DRONE_TARGETS[0]:
+            self._drone_fight(ctx, s)
         elif th == "drone" and ctx.tap("btn_drone", 2):
             for _ in range(5):
                 if not ctx.tap("btn_drone_up", 1.2, after=0.4):
@@ -1761,16 +2301,84 @@ class FirstLady(Task):
 
 
 # ---------------------------------------------------------------- relatórios e mapa
+REPORT_DAYS = ["todo dia", "segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+REPORT_KINDS = [("vs", "VS semanal", "tab_vs_week"), ("vs_daily", "VS diário", "tab_vs"),
+                ("donation", "Doação diária", "tab_donation"), ("donation_week", "Doação semanal", "tab_donation_week"),
+                ("kills", "Pontuações de mortes", "tab_kills")]
+
+
+def _xlsx(path, rows):
+    """Planilha .xlsx mínima (só texto e números) sem precisar do openpyxl."""
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    def cell(ref, v):
+        if isinstance(v, (int, float)):
+            return f'<c r="{ref}"><v>{v}</v></c>'
+        return f'<c r="{ref}" t="inlineStr"><is><t>{escape(str(v))}</t></is></c>'
+
+    cols = "ABCDEFGHIJ"
+    body = "".join(f'<row r="{i}">' + "".join(cell(f"{cols[j]}{i}", v) for j, v in enumerate(r)) + "</row>"
+                   for i, r in enumerate(rows, 1))
+    files = {
+        "[Content_Types].xml": '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.'
+                               'org/package/2006/content-types"><Default Extension="rels" ContentType="application/'
+                               'vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType='
+                               '"application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/'
+                               'vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName='
+                               '"/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.'
+                               'spreadsheetml.worksheet+xml"/></Types>',
+        "_rels/.rels": '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/'
+                       'package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/'
+                       'officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/'
+                           'spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
+                           'relationships"><sheets><sheet name="Relatorio" sheetId="1" r:id="rId1"/></sheets>'
+                           '</workbook>',
+        "xl/_rels/workbook.xml.rels": '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.'
+                                      'openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type='
+                                      '"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"'
+                                      ' Target="worksheets/sheet1.xml"/></Relationships>',
+        "xl/worksheets/sheet1.xml": '<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.'
+                                    'openxmlformats.org/spreadsheetml/2006/main"><sheetData>' + body +
+                                    '</sheetData></worksheet>',
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+
+
 class Reports(Task):
     id, name, icon, group = "reports", "Relatórios R4/R5", "▤", "Relatórios & Mapa"
-    description = "Abre o ranking (VS, doações, abates), rola a lista, lê nomes e pontos por OCR e salva em CSV " \
-                  "(abre no Excel)."
-    default_interval = 1440.0
-    templates = [("btn_alliance_ranking", "Ranking da aliança"), ("tab_vs", "Aba VS/pontos do dia"),
-                 ("tab_donation", "Aba doações"), ("tab_kills", "Aba abates")]
-    fields = [Field("vs", "VS do dia", "bool", True), Field("donation", "Doações", "bool", True),
-              Field("kills", "Abates", "bool", False),
-              Field("pages", "Páginas a rolar", "int", 12, minimum=1, maximum=60)]
+    description = "Abre o ranking (VS semanal/diário, doações diária/semanal, mortes), lê nomes e pontos por OCR e " \
+                  "salva em Excel, Texto e CSV, no horário agendado."
+    default_interval = 15.0
+    templates = [("btn_alliance_ranking", "Ranking da aliança"), ("tab_vs", "Aba VS do dia"),
+                 ("tab_vs_week", "Aba VS da semana"), ("tab_donation", "Aba doações de hoje"),
+                 ("tab_donation_week", "Aba doações da semana"), ("tab_kills", "Aba abates")]
+    fields = [Field(k, label, "bool", k in ("vs", "donation")) for k, label, _ in REPORT_KINDS] + [
+        Field("when", "Executar em", "choice", "todo dia", options=REPORT_DAYS),
+        Field("at", "…às (HH:MM, hora do PC)", "text", "09:00"),
+        Field("xlsx", "Salvar em Excel (.xlsx)", "bool", True), Field("txt", "Salvar em Texto (.txt)", "bool", True),
+        Field("csv", "Salvar em CSV (.csv)", "bool", True),
+        Field("keep", "Manter só os últimos (relatórios de cada tipo)", "int", 10, minimum=1, maximum=500),
+        Field("pages", "Páginas a rolar", "int", 12, minimum=1, maximum=60),
+        Field("last_run", "Último relatório (automático)", "text", "")]
+    cards = [
+        ("Relatórios", [Card(label, "▤", f"Abre o ranking '{label}' e salva a lista inteira.", toggle=k)
+                        for k, label, _ in REPORT_KINDS]),
+        ("Agendar e arquivos", [
+            Card("Agendar", "◷", "Com o bot rodando, cria os relatórios a partir deste horário (num momento seguro) e "
+                 "continua o que estava fazendo. 'Executar agora' na página funciona com o bot parado.",
+                 fields=["when", "at"], summary=lambda s: f"{s['when']} às {s['at']}" + (
+                     f" · último {s['last_run']}" if s.get("last_run") else "")),
+            Card("Arquivos", "📁", "Formatos e quantos guardar (o mais antigo de cada tipo é apagado).",
+                 fields=["xlsx", "txt", "csv", "keep", "pages"],
+                 summary=lambda s: "salva em " + (", ".join(n for k, n in (("xlsx", "Excel"), ("txt", "Texto"),
+                                                                         ("csv", "CSV")) if s[k]) or "CSV")
+                 + f"; mantém {s['keep']}"),
+        ]),
+    ]
 
     @staticmethod
     def parse(lines):
@@ -1784,36 +2392,80 @@ class Reports(Task):
                     rows[name] = max(val, rows.get(name, 0))
         return rows
 
+    def _due(self, s, ctx):
+        """Agendado para hoje e já passou da hora, e ainda não rodou hoje? 'Executar agora' sempre roda."""
+        if ctx.forced:
+            return True
+        if int(s.get("interval_min", 15) or 15) >= 1440:
+            s["interval_min"] = 15  # versões antigas rodavam 1x por dia: agora confere o horário a cada 15 min
+        today = dt.date.today().isoformat()
+        if s.get("last_run", "").startswith(today):
+            return False
+        when = s.get("when", "todo dia")
+        if when != "todo dia" and REPORT_DAYS.index(when) - 1 != dt.date.today().weekday():
+            return False
+        t = _hm(s.get("at", "09:00"))
+        now = dt.datetime.now()
+        return t is None or now.hour * 60 + now.minute >= t
+
+    def _save(self, s, key, rows):
+        stamp = f"{dt.datetime.now():%Y-%m-%d_%H%M}"
+        table = [["posição", "nome", "pontos"]] + [[i, k, v] for i, (k, v) in
+                                                   enumerate(sorted(rows.items(), key=lambda kv: -kv[1]), 1)]
+        made = []
+        if s.get("csv", True) or not (s.get("xlsx") or s.get("txt")):
+            path = os.path.join(REPORT_DIR, f"{key}_{stamp}.csv")
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                csv.writer(fh, delimiter=";").writerows(table)
+            made.append(path)
+        if s.get("txt"):
+            path = os.path.join(REPORT_DIR, f"{key}_{stamp}.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(f"{r[0]:>4}  {str(r[1])[:28]:<28}  {r[2]}" for r in table[1:]))
+            made.append(path)
+        if s.get("xlsx"):
+            path = os.path.join(REPORT_DIR, f"{key}_{stamp}.xlsx")
+            _xlsx(path, table)
+            made.append(path)
+        keep = int(s.get("keep", 10) or 10)
+        for ext in ("csv", "txt", "xlsx"):
+            old = sorted(f for f in os.listdir(REPORT_DIR) if f.startswith(key + "_2") and f.endswith("." + ext))
+            for f in old[:-keep]:
+                try:
+                    os.remove(os.path.join(REPORT_DIR, f))
+                except OSError:
+                    pass
+        return made
+
     def run(self, ctx, s):
+        if not self._due(s, ctx):
+            return
         if not ctx.ocr_on():
             ctx.log("▤ Relatórios precisam do OCR ligado", "warn")
             return
         ctx.to_base()
-        for key, tab in (("vs", "tab_vs"), ("donation", "tab_donation"), ("kills", "tab_kills")):
-            if not s[key]:
+        for key, label, tab in REPORT_KINDS:
+            if not s.get(key):
                 continue
             if not (ctx.tap("btn_alliance", 2) and ctx.tap("btn_alliance_ranking", 2) and ctx.tap(tab, 2)):
+                ctx.warn_once(f"rep:{tab}", f"▤ {label}: capture '{tab}' (aba do ranking) no Estúdio")
                 ctx.go_home()
                 continue
             rows = {}
-            for _ in range(int(s["pages"])):
+            for i in range(int(s["pages"])):
                 f = ctx.frame()
                 new = self.parse(ctx.ocr.read(f, region=(0.05, 0.15, 0.9, 0.75)))
                 before = len(rows)
                 for k, v in new.items():
                     rows[k] = max(v, rows.get(k, 0))
-                if len(rows) == before and _ > 0:
+                if len(rows) == before and i > 0:
                     break
                 ctx.drag_rel(0.5, 0.78, 0.5, 0.32, 0.6)
                 ctx.sleep(0.8)
-            path = os.path.join(REPORT_DIR, f"{key}_{dt.datetime.now():%Y-%m-%d_%H%M}.csv")
-            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
-                w = csv.writer(fh, delimiter=";")
-                w.writerow(["posição", "nome", "pontos"])
-                for i, (k, v) in enumerate(sorted(rows.items(), key=lambda kv: -kv[1]), 1):
-                    w.writerow([i, k, v])
-            ctx.log(f"▤ Relatório {key}: {len(rows)} membros → {os.path.basename(path)}")
+            made = self._save(s, key, rows)
+            ctx.log(f"▤ {label}: {len(rows)} membros → " + ", ".join(os.path.basename(m) for m in made))
             ctx.go_home()
+        s["last_run"] = f"{dt.datetime.now():%Y-%m-%d %H:%M}"
 
 
 class MapScanner(Task):
@@ -2108,21 +2760,97 @@ class Heroes(Task):
         ctx.go_home()
 
 
+SHIELD_HOURS = ["8 h", "12 h", "24 h"]
+WEEKDAYS_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+
+
+def _week_min(day, hhmm):
+    t = _hm(hhmm)
+    return (WEEKDAYS_PT.index(day) if day in WEEKDAYS_PT else 0) * 1440 + (t if t is not None else 0)
+
+
 class Shield(Task):
     id, name, icon, group = "shield", "Escudo Automático", "⛨", "Sempre ligado"
-    description = "Ativa o escudo no horário da agenda e renova quando aparece o aviso de expiração."
+    description = "Mantém um escudo ativo dentro do seu horário: ativa o próximo um pouco antes do anterior acabar " \
+                  "(escudo do inventário; a Loja da Aliança como reserva). Nunca compra com diamantes."
     default_interval = 10.0
     templates = [("shield_expiring", "Ícone de escudo acabando/ausente"), ("btn_base_buffs", "Botão de buffs da base"),
-                 ("buff_shield", "Linha do escudo nos buffs")]
-    fields = [Field("always", "Renovar mesmo sem aviso", "bool", False)]
+                 ("buff_shield", "Linha do escudo nos buffs"),
+                 ("btn_alliance_shop", "Loja da Aliança"), ("shop_shield", "Escudo na Loja da Aliança")]
+    fields = [Field("from_day", "De (dia)", "choice", "Segunda", options=WEEKDAYS_PT),
+              Field("from_time", "…às", "text", "00:00"),
+              Field("to_day", "Até (dia)", "choice", "Domingo", options=WEEKDAYS_PT),
+              Field("to_time", "…às", "text", "23:59"),
+              Field("hours", "Escudo", "choice", "24 h", options=SHIELD_HOURS),
+              Field("ahead_min", "Ativar o próximo quanto antes de acabar (min)", "int", 20, minimum=1, maximum=180),
+              Field("alliance_shop", "Usar a Loja da Aliança se faltar no inventário", "bool", True),
+              Field("always", "Renovar mesmo sem aviso (versões antigas)", "bool", False),
+              Field("shield_until", "Escudo ativo até (automático)", "text", "")]
+    cards = [("Configurar", [
+        Card("Quando", "◷", "Dias e horários (relógio do PC) em que o bot pode ativar o escudo. Para a semana toda: "
+             "Segunda 00:00 até Domingo 23:59.", fields=["from_day", "from_time", "to_day", "to_time"],
+             summary="{from_day} {from_time} → {to_day} {to_time}"),
+        Card("Manter o escudo ativo", "⛨", "Ativa o escudo e renova um pouco antes de acabar. Primeiro o do "
+             "inventário, depois a Loja da Aliança. Dica: tenha escudos no inventário.",
+             fields=["hours", "ahead_min", "alliance_shop"], summary="{hours} · renova {ahead_min} min antes"),
+    ])]
+
+    def _in_window(self, s):
+        now = dt.datetime.now()
+        t = now.weekday() * 1440 + now.hour * 60 + now.minute
+        a, b = _week_min(s["from_day"], s["from_time"]), _week_min(s["to_day"], s["to_time"])
+        return a <= t <= b if a <= b else (t >= a or t <= b)
+
+    def _from_inventory(self, ctx, hours):
+        """Inventário → escudo da duração (IA shield_8/12/24, rolando) → Usar → confirma."""
+        if not ctx.tap("btn_inventory", 2, after=1.5):
+            return False
+        cls = f"shield_{hours}"
+        for _ in range(6):
+            hit = ctx.seen(cls, 0.45, ctx.frame())
+            if hit:
+                ctx.tap_xy(hit[0], hit[1], spread=2)
+                ctx.sleep(0.8)
+                if ctx.tap("btn_use", 2, after=1.0):
+                    ctx.tap("btn_confirm", 1.2)
+                    return True
+                return False
+            ctx.drag_rel(0.5, 0.75, 0.5, 0.4, 0.6)
+            ctx.sleep(0.8)
+        return False
+
+    def _from_shop(self, ctx):
+        if not (ctx.vision.has("btn_alliance_shop") and ctx.vision.has("shop_shield")):
+            return False
+        ok = ctx.tap("btn_alliance", 2) and ctx.tap("btn_alliance_shop", 2) and ctx.tap("shop_shield", 2) \
+            and ctx.tap("btn_use", 2)
+        return bool(ok)
 
     def run(self, ctx, s):
-        ctx.to_base()
-        if not (s["always"] or (ctx.vision.has("shield_expiring") and ctx.exists("shield_expiring", 0.85))):
+        if not self._in_window(s):
             return
-        ok = ctx.tap("btn_base_buffs", 2) and ctx.tap("buff_shield", 2) and ctx.tap("btn_use", 2)
-        ctx.log("⛨ Escudo ativado" if ok else "⛨ Falha ao ativar escudo", "info" if ok else "warn")
+        hours = int(str(s.get("hours", "24 h")).split()[0])
+        until = float(s.get("shield_until") or 0)
+        due = time.time() >= until - int(s.get("ahead_min", 20)) * 60
+        warn = ctx.vision.has("shield_expiring") and ctx.exists("shield_expiring", 0.85)
+        if not (due or warn or s.get("always")):
+            return
+        ctx.to_base()
+        ok = self._from_inventory(ctx, hours) if ctx.ai_on() else False
         if not ok:
+            ctx.go_home()
+            ctx.to_base()
+            ok = bool(ctx.tap("btn_base_buffs", 2) and ctx.tap("buff_shield", 2) and ctx.tap("btn_use", 2))
+        if not ok and s.get("alliance_shop"):
+            ctx.go_home()
+            ok = self._from_shop(ctx)
+        if ok:
+            s["shield_until"] = str(int(max(time.time(), until) + hours * 3600) if until > time.time()
+                                    else int(time.time() + hours * 3600))
+            ctx.counters.add("shields")
+            ctx.log(f"⛨ Escudo de {hours} h ativado")
+        else:
+            ctx.log("⛨ Falha ao ativar escudo (sem escudo no inventário?)", "warn")
             ctx.notify("falha ao renovar escudo")
         ctx.go_home()
 

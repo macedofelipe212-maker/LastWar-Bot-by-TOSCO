@@ -109,6 +109,7 @@ class Context:
         self._guard_cache = {}      # célula do toque -> (hora, motivo ou None)
         self.deadline = None        # hora limite da tarefa atual (TaskTimeout)
         self.task_name = ""
+        self.forced = False         # a tarefa atual veio de "executar agora" (ignora horários próprios)
 
     @property
     def cfg(self):
@@ -713,6 +714,7 @@ class Engine:
         self.recent_frames = collections.deque(maxlen=6)  # quando o bot tirou o último print (a janela "o que a IA vê" reaproveita)
         self.last_run = {}
         self.queue = []          # módulos pedidos com "executar agora"
+        self._forced = set()
         self.only = None         # se definido, roda só estes módulos (agenda / scanner)
         self.started_at = None
         self.stats = {"taps": 0, "runs": 0, "errors": 0}
@@ -868,6 +870,8 @@ class Engine:
             t = item if isinstance(item, tuple) else self.task_by_id(item)
             if t:
                 due.append(t)
+                if not isinstance(t, tuple):
+                    self._forced.add(t.id)
         if self.only == "oneshot":
             return due
         main = self.main_task()
@@ -1014,6 +1018,8 @@ class Engine:
         s = None if is_job else self.cfg.task(t.id, t.defaults())
         mins = 0 if is_job else float(t.budget_min(s) or 0)
         ctx.task_name, ctx.deadline = name, (time.time() + mins * 60 if mins > 0 else None)
+        ctx.forced = not is_job and t.id in self._forced
+        self._forced.discard(None if is_job else t.id)
         try:
             if is_job:
                 t[1](ctx)
