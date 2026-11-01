@@ -102,6 +102,8 @@ YOLO_TARGETS = {
     "btn_alliance_tech": ["alliance_tech_btn"], "tech_recommended": ["ally_tech_recommend"],
     "btn_donate": ["ally_tech_donate_btn"], "btn_alliance_help": ["Ally Help", "help_icon"],
     "btn_trucks": ["My Trucks"], "btn_plunder": ["plunder_btn"],
+    # Corrida Armamentista (painel de Eventos): pontuação e baús
+    "arms_score": ["arms_race_score"], "arms_chest": ["arms_chest_score"], "arms_chest_day": ["arms_chest_day"],
 }
 
 # Tela principal (base ou mapa) e o que, por cima dela, indica uma janela aberta (fonte: LWFarmBot utils.on_main).
@@ -120,6 +122,10 @@ URGENT_SIGNALS = {"auto_digs": ("dig_claim", "dig_alert", "gift_alert")}
 LABEL_UNDER_ICON = {"btn_alliance": 0.03, "btn_mail": 0.03, "btn_inventory": 0.03, "btn_events": 0.03}
 
 # Temas da Corrida Armamentista: palavra-chave -> tema
+# Nome da aba da Corrida no painel de Eventos (para abrir pelo texto quando a IA não confirmar)
+ARMS_RACE_TAB = ["Corrida Armamentista", "Arms Race", "Carrera Armamentista", "Course aux armements",
+                 "Wettrüsten", "Corsa agli armamenti", "Гонка вооружений", "Silahlanma Yarışı"]
+
 ARMS_RACE_THEMES = {
     "city": ["Construção", "Building", "Construcción", "Bâtiment", "Gebäude", "Edifici", "Строительство", "İnşa"],
     "tech": ["Pesquisa", "Tecnologia", "Research", "Technology", "Investigación", "Recherche", "Forschung",

@@ -13,12 +13,12 @@ import random
 import re
 import time
 
-from ..core import rapid, tesseract
+from ..core import catalog, rapid, tesseract
 from ..core.engine import Card, Field, Task
 from ..core.ocr import norm
 from ..core.paths import REPORT_DIR
-from ..core.scanner import CATEGORIES, DEFAULTS as SCAN_DEFAULTS, ScanStore, measure_shift
-from ..core.targets import ARMS_RACE_THEMES, TEXT_TARGETS
+from ..core.scanner import CAT_NAMES, CATEGORIES, DEFAULTS as SCAN_DEFAULTS, ScanStore, measure_shift
+from ..core.targets import ARMS_RACE_TAB, ARMS_RACE_THEMES, TEXT_TARGETS
 
 SQUADS = ["1", "2", "3", "4"]
 LEVELS = ["UR", "SSR", "SR", "R", "N"]
@@ -303,17 +303,23 @@ class AutoDigs(Task):
 
     def _join(self, ctx, s, logo):
         """NAVIGATED → JOINING: toca no logo; 'Ajudar a cavar' → esquadrão → Marchar."""
-        ctx.tap_xy(*logo, spread=2)
-        end = time.time() + 3.5
         nxt = None
-        while time.time() < end and not nxt:
-            f = ctx.frame()
-            for name in ("dig_claim", "dig_help", "dig_timer_popup"):
-                if ctx.ai(name, f):
-                    nxt = name
-                    break
-            else:
-                ctx.sleep(0.3, human=False)
+        h = ctx.frame(fresh=False).shape[0]
+        # o 1º toque é no logo; se o popup não abrir (ex.: logo não reconhecido e o toque foi no centro da tela),
+        # tenta um pouco acima e um pouco abaixo antes de desistir
+        for dy in (0.0, -0.06, 0.06):
+            ctx.tap_xy(logo[0], int(logo[1] + dy * h), spread=2)
+            end = time.time() + (3.5 if dy == 0 else 2.0)
+            while time.time() < end and not nxt:
+                f = ctx.frame()
+                for name in ("dig_claim", "dig_help", "dig_timer_popup"):
+                    if ctx.ai(name, f):
+                        nxt = name
+                        break
+                else:
+                    ctx.sleep(0.3, human=False)
+            if nxt:
+                break
         if nxt == "dig_claim":
             return self._claim(ctx, s)
         if nxt == "dig_help":
@@ -1046,27 +1052,125 @@ class ArmsRace(Task):
     fields = [Field("units", "Tropas: treinar", "bool", True), Field("heroes", "Heróis: recrutar", "bool", False),
               Field("drone", "Drone: melhorar", "bool", True), Field("tech", "Pesquisa: acelerar", "bool", False),
               Field("city", "Construção: acelerar", "bool", False),
-              Field("kill", "Abates: rodar Zumbis/Rally", "bool", True)]
+              Field("kill", "Abates: rodar Zumbis/Rally", "bool", True),
+              Field("reset_time", "Início da 1ª faixa no seu relógio (meia-noite do servidor)", "text", "23:00",
+                    hint="A Corrida tem 6 faixas de 4 h por dia; a 1ª começa na meia-noite do servidor"),
+              Field("collect", "Coletar os baús da Corrida", "bool", True),
+              Field("target", "Meta de baús por faixa (depois disso não insiste)", "choice", "3",
+                    options=["1", "2", "3", "máx"]),
+              Field("stop_full", "Parar quando já tiver 18/18 baús do dia", "bool", True),
+              Field("speedups", "Acelerações por rodada (construção/pesquisa)", "int", 1, minimum=0, maximum=20)]
+    cards = [
+        ("Quais temas fazer", [
+            Card("Tropas", "⚔", "Treina tropas no quartel no tema de Unidades.", toggle="units"),
+            Card("Heróis", "★", "Recruta heróis no tema de Heróis.", toggle="heroes"),
+            Card("Drone", "✈", "Melhora o drone no tema de Drone.", toggle="drone"),
+            Card("Pesquisa", "⚗", "Usa aceleração na pesquisa no tema de Tecnologia.", toggle="tech"),
+            Card("Construção", "⚒", "Usa aceleração na construção no tema de Cidade.", toggle="city"),
+            Card("Abates", "☠", "Roda Zumbis/Rally no tema de Abates.", toggle="kill"),
+        ]),
+        ("Faixas e baús", [
+            Card("Horário das faixas", "◷", "6 faixas de 4 h por dia, a partir da meia-noite do servidor.",
+                 fields=["reset_time"], summary="1ª faixa às {reset_time}"),
+            Card("Baús", "▣", "Coleta os baús de pontos e do dia; para quando bater a meta da faixa.",
+                 toggle="collect", fields=["target", "stop_full"],
+                 summary=lambda s: f"meta {s['target']} por faixa" + (" · para em 18/18" if s["stop_full"] else "")),
+            Card("Acelerações", "⏩", "Quantas acelerações usar por rodada nos temas de construção e pesquisa "
+                                      "(0 = nenhuma).", fields=["speedups"], summary="até {speedups} por rodada"),
+        ]),
+    ]
+
+    @staticmethod
+    def stage(reset_time, now=None):
+        """Faixa atual da Corrida: (número 1–6, início 'HHh', fim 'HHh', minutos até acabar, 'MMDD' do início)."""
+        now = now or dt.datetime.now()
+        try:
+            h, m = map(int, str(reset_time).split(":"))
+        except ValueError:
+            h, m = 23, 0
+        start = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if start > now:
+            start -= dt.timedelta(days=1)
+        mins = int((now - start).total_seconds() // 60)
+        n = mins // 240
+        a = start + dt.timedelta(minutes=240 * n)
+        b = a + dt.timedelta(minutes=240)
+        return n + 1, a.strftime("%Hh"), b.strftime("%Hh"), int((b - now).total_seconds() // 60), a.strftime("%m%d")
+
+    def _open(self, ctx):
+        """Abre o painel da Corrida: imagem sua (btn_arms_race) ou Eventos → aba da Corrida (pela IA)."""
+        if ctx.vision.has("btn_arms_race"):
+            if not ctx.tap("btn_arms_race", 2, after=1.2):
+                return False
+        elif not ctx.tap("btn_events", 2, after=1.5):
+            return False
+        if ctx.ai_wait("arms_score", 2.5):
+            return True
+        if ctx.tap_text(ARMS_RACE_TAB, 2, after=1.2):  # aba pelo nome, se a IA não confirmou
+            return bool(ctx.ai_wait("arms_score", 2.5)) or True
+        return True  # sem confirmação da IA: segue pelo texto do tema
 
     def theme(self, ctx):
-        if not ctx.tap("btn_arms_race", 2, after=1.2):
-            return None
         txt = ctx.read_text(region=(0.0, 0.05, 1.0, 0.45))
-        ctx.go_home()
-        from ..core.ocr import norm
         t = norm(txt)
         for key, words in ARMS_RACE_THEMES.items():
             if any(norm(w) in t for w in words):
                 return key
         return None
 
+    def _chests(self, ctx, s, st_key):
+        """Coleta baús; devolve True se o dia já está completo (18/18) e a opção de parar está ligada."""
+        txt = ctx.read_text(region=(0.0, 0.0, 1.0, 0.6))
+        m = re.search(r"(\d{1,2})\s*/\s*18\b", txt)
+        if m and s.get("stop_full") and int(m.group(1)) >= 18:
+            ctx.log("🏁 18/18 baús do dia — nada mais a fazer hoje na Corrida")
+            return True
+        if not s.get("collect"):
+            return False
+        cap = 99 if s.get("target") == "máx" else int(s.get("target") or 3)
+        got = ctx.counters.get(st_key)
+        tried = []
+        for _ in range(4):  # um baú por vez, olhando a tela de novo a cada um
+            if got >= cap:
+                break
+            hits = [h for name in ("arms_chest_day", "arms_chest") for h in sorted(ctx.find_all(name),
+                                                                                   key=lambda h: -h[0])]
+            hits = [h for h in hits if all(abs(h[0] - t[0]) > 20 or abs(h[1] - t[1]) > 20 for t in tried)]
+            if not hits:
+                break
+            x, y = hits[0]
+            tried.append((x, y))
+            ctx.tap_xy(x, y, spread=2)
+            ctx.sleep(1.0)
+            if ctx.seen("reward_message", 0.4) or ctx.lone_confirm():
+                got = ctx.counters.add(st_key)
+                ctx.log(f"🏁 Baú da Corrida coletado ({got}/{cap if cap < 99 else 'máx'} nesta faixa)")
+            if not ctx.ai("arms_score"):  # abriu um popup (recompensa ou prévia do baú): fecha e confere
+                ctx.press_back()
+                if not ctx.ai("arms_score", ctx.frame()):
+                    break  # saiu do painel: não toca mais às cegas
+        return False
+
     def run(self, ctx, s):
+        n, a, b, left, day = self.stage(s.get("reset_time", "23:00"))
+        st_key = f"arms_chests_{day}_{n}"  # baús desta faixa, deste dia
+        ctx.log(f"🏁 Corrida: faixa {n}/6 ({a}–{b}), acaba em {left // 60}h{left % 60:02d}")
+        if not self._open(ctx):
+            ctx.log("🏁 Não consegui abrir a Corrida (capture 'btn_arms_race' no Estúdio se a IA não achar)", "warn")
+            return
         th = self.theme(ctx)
+        done = self._chests(ctx, s, st_key)
+        ctx.go_home()
+        if done:
+            return
         if not th:
             ctx.log("🏁 Tema da Corrida não identificado", "warn")
             return
         ctx.log(f"🏁 Tema atual: {th}")
         if not s.get(th):
+            return
+        if th in ("tech", "city") and int(s.get("speedups", 1)) <= 0:
+            ctx.log("🏁 Acelerações em 0 — tema de construção/pesquisa pulado")
             return
         ctx.to_base()
         if th == "units" and ctx.tap("btn_barracks", 2):
@@ -1078,7 +1182,9 @@ class ArmsRace(Task):
                 if not ctx.tap("btn_drone_up", 1.2, after=0.4):
                     break
         elif th in ("tech", "city") and ctx.tap("btn_research" if th == "tech" else "btn_speedup", 2):
-            ctx.tap("btn_speedup", 1.5) and ctx.tap("btn_use", 1.5)
+            for _ in range(int(s.get("speedups", 1))):
+                if not (ctx.tap("btn_speedup", 1.5) and ctx.tap("btn_use", 1.5)):
+                    break
         elif th == "kill":
             ctx.e.run_now("hunt")
         ctx.go_home()
@@ -1215,12 +1321,37 @@ class MapScanner(Task):
             return cur, dx_px, dy_px
         return cur, -mx, -my
 
+    # O que a IA já reconhece no mapa, por categoria do scanner: o scanner funciona sem você capturar nada.
+    # (ícones capturados por você no Estúdio continuam valendo e somam com a IA)
+    AI_MAP = {"truck": ("truck_map", "Truck"), "mission": ("task_map", "Secret Task", "Secret Task Ally",
+                                                          "Secret Task non-ally"),
+              "boss": ("boss_zombie", "boss_walker", "elite_maudite", "garde_marechal"),
+              "res_food": ("Farm",), "res_iron": ("Iron Mine",), "res_gold": ("Gold Mine",)}
+
+    def _hits(self, ctx, f, cat, s):
+        """Detecções de uma categoria no frame: imagens suas (map_…) + IA. [(x, y, score, w, h)]"""
+        out = []
+        if ctx.vision.has(f"map_{cat}"):
+            out += ctx.vision.find_all(f, f"map_{cat}", float(s["threshold"]))
+        if ctx.ai_on():
+            d = ctx.dets(f, conf=0.2)
+            for cls in self.AI_MAP.get(cat, ()):
+                thr = catalog.threshold(cls, ctx.cfg)
+                out += [h for h in d.get(cls, []) if h[2] >= max(0.4, thr)]
+        return out
+
     def run(self, ctx, s):
         st = self.store
-        cats = [k for k, _, _ in CATEGORIES if s["categories"].get(k, True) and ctx.vision.has(f"map_{k}")]
+        ai = ctx.ai_on()
+        cats = [k for k, _, _ in CATEGORIES if s["categories"].get(k, True)
+                and (ctx.vision.has(f"map_{k}") or (ai and k in self.AI_MAP))]
         if not cats:
-            ctx.log("◎ Capture ao menos um ícone de mapa (map_…) no Estúdio", "warn")
+            ctx.log("◎ Nada para procurar: ligue a IA (Configurações) ou capture um ícone de mapa (map_…) "
+                    "no Estúdio de imagens", "warn")
             return
+        ctx.log("◎ Procurando: " + ", ".join(CAT_NAMES[k] for k in cats)
+                + ("  (pela IA" + (" + suas imagens)" if any(ctx.vision.has(f"map_{k}") for k in cats) else ")")
+                   if ai else ""))
         f = self._home(ctx, s)
         h, w = f.shape[:2]
         rows, cols, step = int(s["rows"]), int(s["cols"]), float(s["step"])
@@ -1234,7 +1365,7 @@ class MapScanner(Task):
         for r in range(rows):
             for c in range(cols):
                 for cat in cats:
-                    for (x, y, score, tw, th) in ctx.vision.find_all(f, f"map_{cat}", float(s["threshold"])):
+                    for (x, y, score, tw, th) in self._hits(ctx, f, cat, s):
                         if not (0.1 * w < x < 0.9 * w and 0.12 * h < y < 0.85 * h):
                             continue  # HUD do jogo
                         label = ""

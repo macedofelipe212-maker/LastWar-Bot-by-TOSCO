@@ -15,7 +15,7 @@ DEFAULTS = {
     "game_exe_path": "",
     "adb_path": "",
     "adb_serial": "",
-    "resize_to": "",
+    "resize_to": "auto",                  # auto = tamanho padrão 16:9 que cabe na tela · "" = não mexer · "WxH"
     "restart_wait_seconds": 90,
     "reset_time": "05:00",
     "loop_delay": 1.0,
@@ -70,6 +70,10 @@ class Config:
         self.profiles = raw.get("profiles", {})
         self.profiles.setdefault(self.active, {})
         self.data = _merge(DEFAULTS, self.profiles[self.active])
+        # versões antigas gravavam "" (não mexer) sem a pessoa escolher: passa uma vez para o tamanho padrão
+        if self.data.get("resize_to") == "" and not self.data.get("_mig_resize_auto"):
+            self.data["resize_to"] = "auto"
+        self.data["_mig_resize_auto"] = True
 
     def task(self, task_id, schema_defaults):
         with self._lock:

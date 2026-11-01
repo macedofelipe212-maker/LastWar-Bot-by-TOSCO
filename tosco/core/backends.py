@@ -61,15 +61,20 @@ class PCBackend:
         if not r:
             return
         want = self.cfg.data.get("resize_to")
+        sw, sh = winapi.user32.GetSystemMetrics(16), winapi.user32.GetSystemMetrics(17)  # área útil
+        if want == "auto":
+            # tamanho padrão 16:9: o maior desta lista que cabe na tela. Sempre o mesmo tamanho = imagens e
+            # posições consistentes entre uma sessão e outra
+            want = next((f"{w}x{h}" for w, h in ((1920, 1080), (1600, 900), (1280, 720), (1024, 576))
+                         if w <= sw and h <= sh), "")
         if want:
             try:
                 w, h = map(int, want.lower().split("x"))
-                sw, sh = winapi.user32.GetSystemMetrics(16), winapi.user32.GetSystemMetrics(17)  # área útil
                 if w > sw or h > sh:
                     log(f"Redimensionar para {w}x{h} ignorado: maior que a tela ({sw}x{sh})", "warn")
-                elif (r[2], r[3]) != (w, h):
+                elif abs(r[2] - w) > 2 or abs(r[3] - h) > 2:
                     winapi.resize_client(self.hwnd, w, h)
-                    log(f"Janela redimensionada para {w}x{h}")
+                    log(f"Janela do jogo ajustada para o tamanho padrão {w}x{h} (era {r[2]}x{r[3]})")
             except ValueError:
                 pass
         winapi.focus(self.hwnd)

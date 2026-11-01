@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from ..core import catalog, winapi
 from ..core.backends import ADBBackend, find_adb
 from ..core.engine import DAYS, AutoClicker, Engine
+from ..core.targets import TEXT_TARGETS
 from ..core.paths import DATA_DIR, PRINT_DIR, REPORT_DIR, ROOT, TEMPLATE_DIR
 from ..core.scanner import CAT_ICONS, CAT_NAMES, CATEGORIES, describe_pos
 from ..tasks import ALL_TASKS, all_templates
@@ -349,12 +350,30 @@ class MainWindow(QMainWindow):
         self.b_stop = button(tr("btn.stop"), "danger", self.engine.stop)
         lay.addWidget(self.b_pause)
         lay.addWidget(self.b_stop)
+        # liga/desliga na hora a pausa quando você mexe no mouse/teclado (também em Configurações)
+        self.b_userpause = QPushButton()
+        self.b_userpause.setObjectName("chip")
+        self.b_userpause.setCheckable(True)
+        self.b_userpause.setChecked(bool(self.cfg.data.get("pause_on_user", True)))
+        self.b_userpause.toggled.connect(self._toggle_userpause)
+        self._toggle_userpause(self.b_userpause.isChecked(), log=False)
+        lay.addWidget(self.b_userpause)
         lay.addStretch(1)
         self.pill = QLabel()
         self.pill.setFixedHeight(30)
         self.pill.setMaximumWidth(360)
         lay.addWidget(self.pill)
         return bar
+
+    def _toggle_userpause(self, on, log=True):
+        self.cfg.data["pause_on_user"] = bool(on)
+        self.b_userpause.setText("✋ Pausar se eu mexer: LIGADO" if on else "✋ Pausar se eu mexer: DESLIGADO")
+        self.b_userpause.setToolTip(
+            "LIGADO: quando você mexe no mouse/teclado, o TOSCO solta o controle e volta após uns segundos parado.\n"
+            "DESLIGADO: o TOSCO continua mesmo com você no PC (o mouse é o mesmo: vocês dois vão disputar).")
+        if log:
+            self.save_soon()
+            self.engine.log("✋ Pausa quando você mexe: " + ("ligada" if on else "DESLIGADA — o bot não espera você"))
 
     def _set_main(self, _=None):
         self.cfg.data["main_task"] = self.main_combo.currentData()
@@ -793,12 +812,18 @@ class MainWindow(QMainWindow):
         self.tpl_variants.setMovement(QListWidget.Static)
         left.lay.addWidget(self.tpl_variants)
         vb = QHBoxLayout()
-        vb.addWidget(button("🗑 apagar esta", "ghost", self._studio_delete_variant, "Apaga só a imagem selecionada acima"))
-        vb.addWidget(button("🗑 todas", "ghost", self._studio_delete, "Apaga todas as imagens deste nome"))
-        vb.addWidget(button("📁 pasta", "ghost", lambda: self._open_dir(TEMPLATE_DIR), "Abre data\\templates"))
-        vb.addWidget(button("◉ IA", "ghost", self._studio_open_vision,
-                            "Abre este nome no Estúdio visual (IA): foto, confiança e o que a IA vê agora"))
+        vb.addWidget(button("🗑 Apagar esta", None, self._studio_delete_variant, "Apaga só a imagem selecionada acima"))
+        vb.addWidget(button("🗑 Todas", None, self._studio_delete, "Apaga todas as imagens deste nome"))
+        vb.addWidget(button("↺ Reaprender", None, self._studio_relearn,
+                            "Apaga e deixa o bot aprender sozinho de novo pelo texto do botão"))
         left.lay.addLayout(vb)
+        vb2 = QHBoxLayout()
+        vb2.addWidget(button("✦ Esquecer aprendidas", "ghost", self._studio_forget_learned,
+                             "Apaga todas as imagens que o bot aprendeu sozinho (✦); ele reaprende quando precisar"))
+        vb2.addWidget(button("📁 Pasta", "ghost", lambda: self._open_dir(TEMPLATE_DIR), "Abre data\\templates"))
+        vb2.addWidget(button("◉ IA", "ghost", self._studio_open_vision,
+                             "Abre este nome no Estúdio visual (IA): foto, confiança e o que a IA vê agora"))
+        left.lay.addLayout(vb2)
         left.lay.addWidget(button("✚ NOVO NOME…", None, self._studio_new_name,
                                   "Cria um nome seu (ex.: para usar em 'toque <nome>' nas Rotinas)"))
 
@@ -903,10 +928,13 @@ class MainWindow(QMainWindow):
         exe.addWidget(button("…", None, self._pick_exe))
         f.addRow(muted("Executável (reabrir após crash)"), exe)
         res = QComboBox()
-        res.addItems(["", "1920x1080", "1600x900", "1366x768", "1280x720"])
-        res.setCurrentText(d["resize_to"])
-        res.currentTextChanged.connect(lambda v: self._set("resize_to", v))
-        f.addRow(muted("Redimensionar janela (vazio = não mexer)"), res)
+        for val, txt in (("auto", "Automático — tamanho padrão 16:9 que cabe na tela (recomendado)"),
+                         ("", "Não mexer na janela"), ("1920x1080", "1920x1080"), ("1600x900", "1600x900"),
+                         ("1280x720", "1280x720")):
+            res.addItem(txt, val)
+        res.setCurrentIndex(max(0, res.findData(d.get("resize_to", "auto"))))
+        res.currentIndexChanged.connect(lambda _: self._set("resize_to", res.currentData()))
+        f.addRow(muted("Tamanho da janela do jogo (ajusta ao INICIAR)"), res)
         adb = QHBoxLayout()
         self.f_adb = QLineEdit(d["adb_path"] or (find_adb() or ""))
         self.f_adb.setPlaceholderText("detectado automaticamente (MuMu, LDPlayer, BlueStacks, Nox, MEmu)")
@@ -1219,11 +1247,16 @@ class MainWindow(QMainWindow):
             im = self.engine.vision._load_file(p)
             if im is None:
                 continue
-            vi = QListWidgetItem(QIcon(bgr_to_pixmap(im)), os.path.basename(p)[:-4].replace(name, "") or "principal")
+            learned = self.engine.vision.is_learned(p)
+            tag = os.path.basename(p)[:-4].replace(name, "") or "principal"
+            vi = QListWidgetItem(QIcon(bgr_to_pixmap(im)), ("✦ aprendida " if learned else "") + tag)
             vi.setData(Qt.UserRole, p)
             vi.setToolTip(f"{os.path.basename(p)} · {im.shape[1]}×{im.shape[0]} px · "
-                          f"tela de origem {self.engine.vision.file_width(p)} px")
+                          f"tela de origem {self.engine.vision.file_width(p)} px"
+                          + ("\n✦ o bot aprendeu sozinho pelo texto — apague se estiver errada" if learned else ""))
             self.tpl_variants.addItem(vi)
+        if self.tpl_variants.count():
+            self.tpl_variants.setCurrentRow(0)  # já selecionada: "apagar" funciona direto
 
     def _studio_capture(self):
         img = self.engine.capture()
@@ -1361,10 +1394,40 @@ class MainWindow(QMainWindow):
         self._studio_msg(f"⬆ {done} imagem(ns) importada(s) para data\\templates")
         self._select_tpl(last) if last else self._fill_templates()
 
+    def _studio_relearn(self):
+        """Apaga as imagens do nome e deixa o bot aprender de novo sozinho (pelo texto, na próxima vez que vir)."""
+        name = self._current_tpl()
+        if not name or not self.engine.vision.has(name):
+            self._studio_msg("Este nome não tem imagem para apagar.", False)
+            return
+        if name not in TEXT_TARGETS:
+            self._studio_msg(f"'{name}' não tem texto para o bot reaprender sozinho — apague e capture de novo.", False)
+            return
+        if QMessageBox.question(self, APP, f"Apagar as imagens de '{name}' e deixar o bot aprender de novo "
+                                           "sozinho (pelo texto) na próxima vez que vir o botão?") != QMessageBox.Yes:
+            return
+        self.engine.vision.delete(name)
+        self.refresh_studio()
+        self._studio_msg(f"↺ '{name}' apagada — o bot vai reaprender sozinho quando achar o botão pelo texto")
+
+    def _studio_forget_learned(self):
+        files = self.engine.vision.learned_files()
+        if not files:
+            self._studio_msg("Nenhuma imagem aprendida sozinha (✦) para apagar.", False)
+            return
+        if QMessageBox.question(self, APP, f"Apagar as {len(files)} imagem(ns) que o bot aprendeu sozinho (✦)? "
+                                           "Ele reaprende pelo texto quando precisar.") != QMessageBox.Yes:
+            return
+        for p in files:
+            self.engine.vision.delete_file(p)
+        self.refresh_studio()
+        self._studio_msg(f"↺ {len(files)} imagem(ns) aprendida(s) apagada(s) — serão reaprendidas sozinhas")
+
     def _studio_delete_variant(self):
-        it = self.tpl_variants.currentItem()
+        it = self.tpl_variants.currentItem() or (self.tpl_variants.item(0) if self.tpl_variants.count() == 1 else None)
         if not it:
-            self._studio_msg("Clique numa das imagens salvas (miniaturas) para apagar só ela.", False)
+            self._studio_msg("Este nome não tem imagem salva para apagar." if not self.tpl_variants.count()
+                             else "Clique numa das imagens salvas (miniaturas) para apagar só ela.", False)
             return
         p = it.data(Qt.UserRole)
         if QMessageBox.question(self, APP, f"Apagar {os.path.basename(p)}?") == QMessageBox.Yes:

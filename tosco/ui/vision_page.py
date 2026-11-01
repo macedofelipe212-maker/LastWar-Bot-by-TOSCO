@@ -73,14 +73,13 @@ class ItemDialog(QDialog):
             self.ex.setPixmap(_big(QPixmap(p)))
         else:
             self.ex.setText("sem foto")
-        self.live = self._panel(row, "NO SEU JOGO AGORA (último ⟳)")
-        self.crop = self.page.crop_of(cls)
-        if self.crop is not None:
-            self.live.setPixmap(_big(bgr_to_pixmap(self.crop)))
-        else:
-            self.live.setText("A IA não viu isto no último print.\n\nAbra no jogo a tela onde isto aparece\n"
-                              "e clique em  ⟳ O QUE A IA VÊ AGORA.")
+        self.live = self._panel(row, "NO SEU JOGO AGORA")
         v.addLayout(row)
+        look = QHBoxLayout()
+        look.addStretch()
+        look.addWidget(_btn("⟳ Procurar no jogo agora", "accent", self._look,
+                            "Tira um print do jogo agora e mostra à direita onde a IA achou isto"))
+        v.addLayout(look)
         self.names = catalog.targets_for(cls)
         vis = self.page.engine.vision
         if self.names:
@@ -92,11 +91,11 @@ class ItemDialog(QDialog):
         help_.setWordWrap(True)
         v.addWidget(help_)
         bar = QHBoxLayout()
-        b = _btn("📷 Usar o recorte do meu jogo", "go", self._use_live,
-                 "Vira a foto daqui E a imagem do Estúdio de imagens (o TOSCO procura essa imagem antes da IA: "
-                 "mais rápido e exato na sua tela)")
-        b.setEnabled(self.crop is not None)
-        bar.addWidget(b)
+        self.use_btn = _btn("📷 Usar o recorte do meu jogo", "go", self._use_live,
+                            "Vira a foto daqui E a imagem do Estúdio de imagens (o TOSCO procura essa imagem antes "
+                            "da IA: mais rápido e exato na sua tela)")
+        bar.addWidget(self.use_btn)
+        self._show_live()
         if self.names:
             bar.addWidget(_btn("▣ Abrir no Estúdio de imagens", None, self._open_studio1,
                                "Vai para o Estúdio de imagens já com este nome escolhido"))
@@ -107,6 +106,23 @@ class ItemDialog(QDialog):
         bar.addStretch()
         bar.addWidget(_btn("Fechar", None, self.accept))
         v.addLayout(bar)
+
+    def _show_live(self):
+        self.crop = self.page.crop_of(self.card.cls)
+        if self.crop is not None:
+            sc = self.page.last_scores.get(self.card.cls, 0)
+            self.live.setPixmap(_big(bgr_to_pixmap(self.crop)))
+            self.live.setToolTip(f"Achado com confiança {sc:.2f}")
+        elif self.page._last_img is None:
+            self.live.setText("Ainda não olhei o jogo.\n\nClique em  ⟳ Procurar no jogo agora.")
+        else:
+            self.live.setText("A IA não achou isto na tela atual do jogo.\n\nAbra no jogo a tela onde isto aparece\n"
+                              "e clique em  ⟳ Procurar no jogo agora.")
+        self.use_btn.setEnabled(self.crop is not None)
+
+    def _look(self):
+        self.page.scan()
+        self._show_live()
 
     def _panel(self, row, title):
         box = QVBoxLayout()
@@ -322,6 +338,9 @@ class VisionPage(QWidget):
         bar.addWidget(_btn("Redefinir tudo", "ghost", self.reset_all, "Apaga todos os seus ajustes de confiança"))
         left.addLayout(bar)
         intro = _muted(
+            "⟳ O QUE A IA VÊ AGORA = um teste: tira um print do jogo do jeito que está na sua tela e mostra o que o "
+            "bot consegue enxergar ali (caixas no print à direita e ● verde nos cartões). Abra no jogo a tela que "
+            "quer testar e clique. "
             "Cada cartão é uma coisa do jogo que a IA reconhece sozinha — você não precisa capturar nada. "
             "Clique na FOTO para ampliar e trocar (a foto é só exemplo; a IA não depende dela). "
             "A BARRINHA é a confiança: ← para a esquerda se o bot não acha isto na tela; → para a direita se ele "
@@ -408,14 +427,26 @@ class VisionPage(QWidget):
             if (q or only) and vis:
                 sec.head.setChecked(True)
 
+    def showEvent(self, e):
+        """Ao abrir a tela já olha o jogo uma vez (sem precisar descobrir o botão)."""
+        super().showEvent(e)
+        if self._last_img is None and not getattr(self, "_auto_tried", False):
+            self._auto_tried = True
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(150, self.scan)
+
     def scan(self):
         img = self.engine.capture()
         if img is None:
-            self.summary.setText(f"⚠ Não consegui capturar o jogo: {self.engine.backend.describe()}")
+            self.summary.setText(f"⚠ Não consegui ver o jogo: {self.engine.backend.describe()}\n"
+                                 "Abra o jogo e clique em  ⟳ O QUE A IA VÊ AGORA.")
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             det = self.engine.yolo.detect(img, self.cfg.get("ai_model", "preciso"), conf=SEEN_MIN)
+        except Exception as ex:  # mostra na tela em vez de falhar calado
+            self.summary.setText(f"⚠ Erro ao olhar o jogo: {type(ex).__name__}: {ex}")
+            return
         finally:
             QApplication.restoreOverrideCursor()
         if not det and self.engine.yolo.error:

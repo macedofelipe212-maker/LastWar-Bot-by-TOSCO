@@ -284,7 +284,7 @@ class Context:
         x0, y0 = max(0, x0), max(0, y0)
         crop = frame[y0:y1, x0:x1].copy()
         if crop.shape[0] >= 10 and crop.shape[1] >= 10:
-            self.vision.save(name, crop, frame.shape[1], source_height=frame.shape[0])
+            self.vision.save(name, crop, frame.shape[1], source_height=frame.shape[0], learned=True)
             self.log(f"▣ Aprendi o botão '{name}' sozinho pelo texto")
 
     def find_text(self, keywords, region=None):

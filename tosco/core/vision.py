@@ -50,14 +50,17 @@ class Vision:
     def available(self):
         return sorted({os.path.basename(f)[:-4].split("@")[0] for f in glob.glob(os.path.join(TEMPLATE_DIR, "*.png"))})
 
-    def save(self, name, bgr, source_width, variant=None, source_height=None):
+    def save(self, name, bgr, source_width, variant=None, source_height=None, learned=False):
         """Salva o template (ou uma variante extra) e lembra o tamanho da janela de origem. A altura é o que
-        importa: o jogo escala a interface pela ALTURA da janela (a largura extra só afasta os cantos)."""
+        importa: o jogo escala a interface pela ALTURA da janela (a largura extra só afasta os cantos).
+        learned: o bot aprendeu sozinho pelo texto (o Estúdio mostra e deixa apagar para ele reaprender)."""
         fname = f"{name}@{variant}" if variant else name
         cv2.imencode(".png", bgr)[1].tofile(os.path.join(TEMPLATE_DIR, fname + ".png"))
         with self._lock:
-            self._widths[fname] = ({"w": int(source_width), "h": int(source_height)} if source_height
-                                   else int(source_width))
+            meta = {"w": int(source_width), "h": int(source_height)} if source_height else {"w": int(source_width)}
+            if learned:
+                meta["auto"] = True
+            self._widths[fname] = meta if len(meta) > 1 else int(source_width)
             self._write_meta()
             self._cache.pop(fname, None)
         return fname
@@ -82,6 +85,15 @@ class Vision:
 
     def file_width(self, p):
         return self.source_width(os.path.basename(p)[:-4])
+
+    def is_learned(self, p):
+        """A imagem foi aprendida sozinha pelo bot (achou o botão pelo texto e recortou)?"""
+        v = self._widths.get(os.path.basename(p)[:-4])
+        return isinstance(v, dict) and bool(v.get("auto"))
+
+    def learned_files(self):
+        return sorted(os.path.join(TEMPLATE_DIR, k + ".png") for k, v in self._widths.items()
+                      if isinstance(v, dict) and v.get("auto") and os.path.isfile(os.path.join(TEMPLATE_DIR, k + ".png")))
 
     def load(self, name):
         """Primeira imagem do template (para miniatura)."""
