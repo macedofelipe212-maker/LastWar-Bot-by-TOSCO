@@ -25,6 +25,12 @@ TEXT_TARGETS = {
     "tab_alliance_war": ["Guerra", "War", "Guerre", "Krieg", "Война", "Savaş", "Perang", "Chiến tranh"],
     "btn_search": ["Buscar", "Search", "Rechercher", "Suchen", "Cerca", "Поиск", "Ara", "Cari", "Tìm kiếm"],
     "btn_go": ["Ir", "Go", "Aller", "Los", "Vai", "Перейти", "Git", "Pergi", "Đi"],
+    # base: treino, pesquisa e recrutamento grátis
+    "btn_train_go": ["Treinar", "Train", "Entrenar", "Entraîner", "Trainieren", "Addestra", "Обучить", "Eğit"],
+    "btn_research_go": ["Pesquisar", "Research", "Investigar", "Rechercher", "Forschen", "Ricerca", "Исследовать",
+                        "Araştır"],
+    "free_label": ["Grátis", "Gratuito", "Free", "Gratis", "Gratuit", "Kostenlos", "Gratuito", "Бесплатно",
+                   "Ücretsiz", "Miễn phí"],
     # combate
     "btn_march": ["Marchar", "March", "Marcher", "Marsch", "Marcia", "Марш", "Yürü", "Berangkat", "Hành quân",
                   "Implantar", "Deploy"],
@@ -96,6 +102,10 @@ YOLO_TARGETS = {
     "rally_alert": [("rally_alert_icon", 0.6)], "btn_join_rally": ["rally_add_btn"], "rally_card": ["rally_card"],
     "btn_rally": ["rally_btn", "Rally Button"], "btn_attack": ["attack_btn"], "btn_battle": ["fight_btn"],
     "btn_challenge": ["challenge_btn"], "btn_heal": ["heal_btn"], "btn_hospital": ["Hospital"],
+    # cura pelo mapa (LWFarmBot auto_heal): ambulância no HUD do Mundo e soldados curados prontos para coletar
+    "hospital_icon": ["health_icon"], "healed_troops": ["health_icon_troops"],
+    # heróis: botão Recrutar Heróis, abas de recrutamento e tiragem x1 (a grátis fica nela)
+    "recruit_tab": ["recruit_tab"], "recruit_x1": ["recruit_x1"],
     # outros
     "btn_use": ["use_btn"], "btn_recruit": ["recruit_btn"], "btn_secret_squad": ["secret_task_icon"],
     "btn_dispatch": ["secret_deploy_btn"], "btn_quick_deploy": ["secret_quick_deploy_btn"],

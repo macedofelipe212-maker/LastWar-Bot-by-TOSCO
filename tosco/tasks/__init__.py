@@ -1454,6 +1454,134 @@ class MapScanner(Task):
 
 
 # ---------------------------------------------------------------- sempre ligado
+class BaseCare(Task):
+    id, name, icon, group = "base_care", "Hospital, Treino & Pesquisa", "✚", "Escavações & Diárias"
+    description = "Cura os feridos pela ambulância do mapa e pede ajuda da aliança; coloca o quartel e o " \
+                  "laboratório parados para trabalhar."
+    default_interval = 30.0
+    templates = [("bubble_train_idle", "Balão do quartel parado (sem treinar)"),
+                 ("bubble_research_idle", "Balão do laboratório parado (sem pesquisa)")]
+    fields = [Field("heal", "Curar feridos", "bool", True),
+              Field("heal_help", "Pedir ajuda da aliança na cura", "bool", True),
+              Field("train", "Treinar quando o quartel estiver parado", "bool", False),
+              Field("research", "Pesquisar quando o laboratório estiver parado", "bool", False)]
+    cards = [("Hospital", [
+        Card("Curar feridos", "✚", "No mapa: coleta os já curados, toca na ambulância e em Curar (a quantidade que o "
+                                   "jogo sugerir). Nunca toca em 'Terminar agora'.", toggle="heal"),
+        Card("Ajuda na cura", "🤝", "Depois de curar, toca na ambulância de novo para pedir ajuda da aliança.",
+             toggle="heal_help"),
+    ]), ("Base parada", [
+        Card("Treino", "⚒", "Quando o quartel estiver parado: abre e toca em Treinar. Precisa da imagem do balão do "
+                            "quartel parado (Estúdio de imagens → 'bubble_train_idle').", toggle="train"),
+        Card("Pesquisa", "⚗", "Quando o laboratório estiver parado: abre e toca em Pesquisar. Precisa da imagem do "
+                              "balão (Estúdio de imagens → 'bubble_research_idle').", toggle="research"),
+    ])]
+
+    def _heal(self, ctx, s):
+        if not ctx.to_world():
+            return
+        for _ in range(2):  # soldados já curados: coleta antes (senão a ambulância só mostra a cura pronta)
+            done = ctx.ai("healed_troops", ctx.frame())
+            if not done:
+                break
+            ctx.tap_xy(done[0][0], done[0][1], spread=2)
+            ctx.sleep(1.0)
+            ctx.log("✚ Soldados curados coletados")
+        amb = ctx.ai("hospital_icon", ctx.frame())
+        if not amb:
+            return  # sem ambulância = ninguém ferido
+        ax, ay = amb[0][0], amb[0][1]
+        ctx.tap_xy(ax, ay, spread=2)
+        ctx.sleep(1.2)
+        if not ctx.tap("btn_heal", 2, after=1.0):
+            ctx.log("✚ Hospital aberto, mas sem botão Curar (cura em andamento ou faltam recursos)")
+            ctx.go_home()
+            return
+        ctx.counters.add("heals")
+        ctx.log("✚ Feridos em cura")
+        if s["heal_help"] and ctx.ai("hospital_icon", ctx.frame()):
+            ctx.tap_xy(ax, ay, spread=2)  # de novo na ambulância = pedir ajuda da aliança
+            ctx.sleep(0.8)
+        ctx.go_home()
+
+    def _idle_building(self, ctx, bubble, go, counter, label):
+        if not ctx.vision.has(bubble):
+            ctx.warn_once(f"need:{bubble}", f"{label}: capture o balão '{bubble}' no Estúdio de imagens (F8) "
+                                            f"para o TOSCO saber quando está parado")
+            return
+        if not ctx.to_base() or not ctx.tap(bubble, 1.0, after=1.2):
+            return
+        if ctx.tap(go, 2, after=1.0):
+            ctx.counters.add(counter)
+            ctx.log(f"{label}: iniciado")
+        else:
+            ctx.log(f"{label}: abri o prédio, mas não achei o botão (faltam recursos?)")
+        ctx.go_home()
+
+    def run(self, ctx, s):
+        if s["heal"]:
+            self._heal(ctx, s)
+        if s["train"]:
+            self._idle_building(ctx, "bubble_train_idle", "btn_train_go", "trained", "⚒ Treino")
+        if s["research"]:
+            self._idle_building(ctx, "bubble_research_idle", "btn_research_go", "research", "⚗ Pesquisa")
+
+
+class Heroes(Task):
+    id, name, icon, group = "heroes", "Heróis: recrutamento grátis", "★", "Escavações & Diárias"
+    description = "Abre Recrutar Heróis e usa só as tiragens GRÁTIS de cada aba. Nunca gasta bilhete nem diamante."
+    default_interval = 240.0
+    fields = [Field("max_tabs", "Quantas abas de recrutamento olhar", "int", 3, minimum=1, maximum=6)]
+    cards = [("Recrutamento", [
+        Card("Só grátis", "★", "Em cada aba, só toca no x1 quando aparece escrito 'Grátis' em cima dele. A trava de "
+                               "compra do TOSCO também bloqueia o toque se houver preço ou diamante perto.",
+             fields=["max_tabs"], summary="olha {max_tabs} abas"),
+    ])]
+
+    @staticmethod
+    def _free_x1(ctx):
+        f = ctx.frame()
+        hits = ctx.ai("recruit_x1", f)
+        if not hits:
+            return False
+        x, y, _, w, h = hits[0]
+        fh, fw = f.shape[:2]
+        # o "Grátis" fica no próprio botão ou logo acima dele
+        region = (max(0.0, (x - w) / fw), max(0.0, (y - 1.8 * h) / fh), min(1.0, 2 * w / fw), min(1.0, 2.6 * h / fh))
+        if not ctx.find_text(TEXT_TARGETS["free_label"], region=region):
+            return False
+        ctx.tap_xy(x, y, spread=2)
+        ctx.sleep(2.5)
+        for _ in range(5):  # sai da revelação até a aba voltar
+            if ctx.ai("recruit_x1", ctx.frame()):
+                break
+            if not ctx.lone_confirm():
+                ctx.tap_rel(0.5, 0.88)
+            ctx.sleep(1.0)
+        return True
+
+    def run(self, ctx, s):
+        if not ctx.ai_on():
+            ctx.warn_once("heroes:ai", "★ Heróis precisa da IA ligada (Configurações)")
+            return
+        if ctx.go_home() is None or not ctx.tap("btn_heroes", 2, after=1.2):
+            return
+        if not ctx.tap("btn_recruit", 2, after=1.5):
+            ctx.go_home()
+            return
+        tabs = sorted(ctx.ai("recruit_tab", ctx.frame()), key=lambda d: d[0]) or [None]
+        got = 0
+        for tab in tabs[:int(s["max_tabs"])]:
+            if tab:
+                ctx.tap_xy(tab[0], tab[1], spread=2)
+                ctx.sleep(1.0)
+            if self._free_x1(ctx):
+                got += 1
+                ctx.counters.add("hero_recruits")
+        ctx.log(f"★ {got} recrutamento(s) grátis" if got else "★ Nenhum recrutamento grátis agora")
+        ctx.go_home()
+
+
 class Shield(Task):
     id, name, icon, group = "shield", "Escudo Automático", "⛨", "Sempre ligado"
     description = "Ativa o escudo no horário da agenda e renova quando aparece o aviso de expiração."
@@ -1538,7 +1666,7 @@ class Routine(Task):
 ALL_TASKS = [AutoDigs(), Survivors(), IdleRewards(), Resources(), Alliance(), Daily(), SecretSquad(), Trucks(), Farm(), Arena(),
              AutoJoin(), Hunt(), MarshalGuard(), ArmsRace(), FirstLady(),
              Reports(), MapScanner(),
-             Shield(), Routine(1), Routine(2), Routine(3)]
+             BaseCare(), Heroes(), Shield(), Routine(1), Routine(2), Routine(3)]
 
 
 def all_templates():

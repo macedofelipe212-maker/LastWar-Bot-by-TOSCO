@@ -1,5 +1,6 @@
 """Janela principal TOSCO."""
 import datetime as dt
+import html
 import os
 import subprocess
 import sys
@@ -110,7 +111,8 @@ class FieldEditor:
         return w
 
 
-DAILY_TASKS = ["survivors", "idle_rewards", "resources", "alliance", "daily", "secret_squad", "trucks", "farm", "arena"]
+DAILY_TASKS = ["survivors", "idle_rewards", "resources", "base_care", "heroes", "alliance", "daily", "secret_squad",
+               "trucks", "farm", "arena"]
 ADVANCED_TASKS = ["routine_1", "routine_2", "routine_3", "map_scanner"]
 
 # (seção, [(chave, ícone, nome, subtítulo)]); "t:<id>" = página de um módulo
@@ -518,6 +520,12 @@ class MainWindow(QMainWindow):
                 ("digs", "stat.digs", T.LIME), ("joins_total", "stat.joins", T.AMBER), ("hunts", "stat.hunts", T.CYAN)]):
             self.stat[key] = StatCard(tr(label), color)
             stats.addWidget(self.stat[key], i // 3, i % 3)
+        # rendimento desde o último INICIAR (por hora) e problemas: quedas, conta no celular, relançamentos
+        self.session_lbl = QLabel()
+        self.session_lbl.setWordWrap(True)
+        self.session_lbl.setTextFormat(Qt.RichText)
+        self.session_lbl.setStyleSheet(f"border:1px solid {T.LINE};border-radius:6px;padding:8px 10px")
+        stats.addWidget(self.session_lbl, 2, 0, 1, 3)
         self.dash_stats = QWidget()
         self.dash_stats.setLayout(stats)
 
@@ -1086,8 +1094,44 @@ class MainWindow(QMainWindow):
             f.addRow(muted(label), e)
         hk.lay.addLayout(f)
         lay.addWidget(hk)
+
+        dg = Card("Diagnóstico (quando der problema)")
+        dg.lay.addWidget(muted("Junta num .zip o registro de hoje e de ontem, os contadores, a configuração SEM o "
+                               "token do Telegram e os últimos prints do jogo. É só mandar o arquivo para quem "
+                               "for ajudar."))
+        r = QHBoxLayout()
+        r.addWidget(button("📦 Gerar pacote de diagnóstico", "accent", self._make_diag))
+        r.addWidget(button("📁 Pasta", "ghost", lambda: os.startfile(self._diag_dir())))
+        r.addStretch(1)
+        dg.lay.addLayout(r)
+        lay.addWidget(dg)
         lay.addStretch(1)
         return scroll(w)
+
+    def _diag_dir(self):
+        from ..core import diag
+        os.makedirs(diag.DIAG_DIR, exist_ok=True)
+        return diag.DIAG_DIR
+
+    def _make_diag(self):
+        from ..core import diag
+        n = len(self.engine.recent_frames)
+        prints = False
+        if n:
+            ans = QMessageBox.question(
+                self, APP, f"Incluir os últimos {n} prints do jogo?\n\nAjudam muito a achar o problema, mas mostram "
+                           "a sua tela (nome, aliança, recursos). Mande só para quem você confia.",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+            if ans == QMessageBox.Cancel:
+                return
+            prints = ans == QMessageBox.Yes
+        try:
+            path = diag.make(self.engine, include_prints=prints)
+        except Exception as ex:
+            QMessageBox.warning(self, APP, f"Não consegui gerar o pacote: {ex}")
+            return
+        self.engine.log(f"📦 Pacote de diagnóstico: {os.path.basename(path)}" + (" (com prints)" if prints else ""))
+        subprocess.Popen(["explorer", "/select,", path])
 
     def _page_phone(self):
         w = QWidget()
@@ -1689,6 +1733,11 @@ class MainWindow(QMainWindow):
             self.stat[k].set(e.stats[k])
         for k in ("digs", "joins_total", "hunts"):
             self.stat[k].set(e.counters.get(k))
+        lines = e.session_lines()
+        parts = [f"<span style='color:{T.RED if bad else T.TEXT}'>{html.escape(t)}</span>" for t, bad in lines]
+        self.session_lbl.setText(f"<b style='color:{T.CYAN}'>ESTA SESSÃO</b>&nbsp;&nbsp;" +
+                                 ("&nbsp;·&nbsp; ".join(parts) if parts else
+                                  f"<span style='color:{T.MUTED}'>nada ainda — aparece depois do INICIAR</span>"))
         if e.running and e.started_at:
             s = int(time.time() - e.started_at)
             self.uptime.setText(f"{tr('uptime')} {s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}")

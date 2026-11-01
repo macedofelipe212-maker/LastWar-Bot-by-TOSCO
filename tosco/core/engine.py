@@ -1,4 +1,5 @@
 """Motor: thread de execução, agendador, watchdog, pausas humanas e a API usada pelas tarefas."""
+import collections
 import datetime as dt
 import os
 import random
@@ -137,6 +138,7 @@ class Context:
         t0 = time.time()
         self.log(f"✋ Você está usando o PC — TOSCO pausado (volta após {wait:.0f} s sem mexer)")
         self.e.current = "pausado: você está usando o PC"
+        self.counters.add("user_pauses")
         self.e._emit()
         while not self.e.stop_flag.is_set():
             age = winapi.user_input_age()
@@ -510,6 +512,7 @@ class Context:
         if sc == "other_device":
             mins = float(self.cfg.get("relog_wait_min", 10))
             self.log(f"📱 Conta aberta em outro aparelho — volto em {mins:.0f} min", "warn")
+            self.counters.add("other_device")
             self.notify(f"conta aberta em outro aparelho, reconecto em {mins:.0f} min")
             self.sleep(mins * 60, human=False)
             if not self.tap("btn_reconnect", 2, after=5) and not self.tap("btn_confirm", 2, after=5):
@@ -706,12 +709,15 @@ class Engine:
         self.thread = None
         self.current = "—"
         self.last_frame = None
-        self.last_frame_t = 0.0  # quando o bot tirou o último print (a janela "o que a IA vê" reaproveita)
+        self.last_frame_t = 0.0
+        self.recent_frames = collections.deque(maxlen=6)  # quando o bot tirou o último print (a janela "o que a IA vê" reaproveita)
         self.last_run = {}
         self.queue = []          # módulos pedidos com "executar agora"
         self.only = None         # se definido, roda só estes módulos (agenda / scanner)
         self.started_at = None
         self.stats = {"taps": 0, "runs": 0, "errors": 0}
+        self.session = {}        # contadores desde o último INICIAR (escavações, rallies, quedas…)
+        self.counters.listener = self._on_count
         self.lines = []
         self._next_break = None
         self.clicker = None
@@ -749,6 +755,33 @@ class Engine:
         if level == "error" and self.cfg.data["telegram"].get("notify_errors"):
             self.telegram.send(f"[TOSCO] {msg}")
 
+    def _on_count(self, key, n):
+        if self.running and self.only != "oneshot":
+            self.session[key] = self.session.get(key, 0) + n
+
+    # (chave do contador, ícone, nome, mostra por hora)
+    SESSION_ITEMS = [("digs", "⛏", "escavações", True), ("joins_total", "⚔", "rallies", True),
+                     ("hunts", "☣", "caçadas", True), ("bubbles", "⛁", "coletas", True),
+                     ("heals", "✚", "curas", False), ("research", "⚗", "pesquisas", False),
+                     ("trained", "⚒", "treinos", False), ("hero_recruits", "★", "recrutas grátis", False),
+                     ("conn_drops", "📶", "quedas de conexão", False), ("other_device", "📱", "conta no celular", False),
+                     ("game_restarts", "↻", "jogo relançado", False), ("user_pauses", "✋", "pausas por você", False)]
+
+    def session_lines(self):
+        """[(texto, é_problema)] do que rendeu desde o último INICIAR."""
+        if not self.started_at:
+            return []
+        hours = max(1 / 60, (time.time() - self.started_at) / 3600)
+        out = []
+        for key, icon, label, rate in self.SESSION_ITEMS:
+            n = self.session.get(key, 0)
+            if n:
+                out.append((f"{icon} {n} {label}" + (f" ({n / hours:.1f}/h)".replace(".", ",") if rate else ""),
+                            key in ("conn_drops", "other_device", "game_restarts")))
+        if self.stats["errors"]:
+            out.append((f"✖ {self.stats['errors']} erros", True))
+        return out
+
     def _emit(self):
         if self.state_cb:
             self.state_cb()
@@ -761,6 +794,9 @@ class Engine:
             img = None
         if img is not None:
             self.last_frame, self.last_frame_t = img, time.time()
+            # últimos prints, um a cada 5 s, para o pacote de diagnóstico (ficam só na memória)
+            if not self.recent_frames or self.last_frame_t - self.recent_frames[-1][0] >= 5:
+                self.recent_frames.append((self.last_frame_t, img))
         return img
 
     # --- comandos -------------------------------------------------------
@@ -772,6 +808,8 @@ class Engine:
         self.stop_flag.clear()
         self.paused = False
         self.started_at = time.time()
+        if not oneshot:
+            self.session = {}
         winapi._mark()  # o clique em "Iniciar" não conta como você usando o PC
         self._schedule_break()
         self.thread = threading.Thread(target=self._loop, daemon=True)
@@ -892,6 +930,7 @@ class Engine:
         ctx._warned.discard("blind")
         if ctx.find("dlg_connection_lost", 0.8, frame=f):
             self.log("Conexão perdida — reconectando", "warn")
+            self.counters.add("conn_drops")
             self.telegram.send("[TOSCO] conexão perdida, reconectando")
             if not ctx.tap("btn_reconnect", 2):
                 ctx.tap_rel(0.5, 0.62)
@@ -922,6 +961,7 @@ class Engine:
         hwnd = winapi.find_window(self.cfg.data["game_window_title"])
         pid = winapi.window_pid(hwnd) if hwnd else 0
         self.log(f"↻ Relançando o jogo ({reason})", "warn")
+        self.counters.add("game_restarts")
         self.telegram.send(f"[TOSCO] relançando o jogo ({reason})")
         if pid:
             subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, creationflags=0x08000000)
@@ -1064,7 +1104,8 @@ class Engine:
         extra = ", ".join(f"{k}: {v}" for k, v in sorted(c.items()) if isinstance(v, int))[:600]
         return (f"[TOSCO] {self.state()} · {self.current}\nativo {up // 3600}h{up % 3600 // 60:02d}m · "
                 f"{self.stats['runs']} execuções · {self.stats['taps']} toques · {self.stats['errors']} erros\n"
-                f"hoje: {extra or '—'}")
+                f"hoje: {extra or '—'}" +
+                (f"\nsessão: {' · '.join(t for t, _ in self.session_lines())}" if self.session_lines() else ""))
 
 
 class AutoClicker:

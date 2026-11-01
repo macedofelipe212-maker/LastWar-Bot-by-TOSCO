@@ -102,6 +102,7 @@ class Counters:
     def __init__(self, cfg, path=os.path.join(DATA_DIR, "contadores_diarios.json")):
         self.cfg, self.path = cfg, path
         self._lock = threading.Lock()
+        self.listener = None  # f(chave, n) a cada add: o motor soma também no contador da sessão
         try:
             with open(path, encoding="utf-8") as f:
                 self.state = json.load(f)
@@ -132,7 +133,10 @@ class Counters:
         with self._lock:
             self.state["values"][key] = self.state["values"].get(key, 0) + n
             self._save()
-            return self.state["values"][key]
+            val = self.state["values"][key]
+        if self.listener:
+            self.listener(key, n)
+        return val
 
     def all(self):
         return dict(self.state["values"])
