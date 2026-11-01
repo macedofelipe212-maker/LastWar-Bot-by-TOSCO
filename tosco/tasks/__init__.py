@@ -47,15 +47,24 @@ def parse_list(text):
     return [p.strip() for p in str(text).replace(";", ",").split(",") if p.strip()]
 
 
-def march(ctx, squads):
-    """Na tela de marcha: escolhe o primeiro esquadrão livre da ordem e envia."""
+def march(ctx, squads, weak_ok=False):
+    """Na tela de marcha: escolhe o primeiro esquadrão livre da ordem e envia. weak_ok: confirma o aviso do jogo
+    'seu esquadrão é fraco demais' (esquadrões fracos ou de 1 herói)."""
+    def sent(sq):
+        if weak_ok:
+            ctx.sleep(0.6)
+            f = ctx.frame()
+            if ctx.seen("confirm_popup", 0.5, f) and ctx.seen("cancel_popup", 0.4, f):
+                ctx.tap("btn_confirm", 1.0, after=0.6)
+        return sq
+
     for sq in squads:
         if ctx.tap(f"squad_{sq}", 1.2, after=0.4):
             if ctx.vision.has("squad_busy") and ctx.exists("squad_busy", 0.88):
                 continue
             if ctx.tap("btn_march", 2):
-                return sq
-    return "auto" if ctx.tap("btn_march", 2) else None
+                return sent(sq)
+    return sent("auto") if ctx.tap("btn_march", 2) else None
 
 
 # ---------------------------------------------------------------- escavações e diárias
@@ -777,10 +786,42 @@ RALLY_BOSS_TEXT = {
 }
 
 
+POSITIONS = ["1+", "2+", "3+", "4", "2 ou 3"]
+POSITION_HELP = ("1+ entra na hora · 2+ espera 1 jogador ter entrado · 3+ espera dois · 4 só pega o último lugar · "
+                 "'2 ou 3' sorteia um dos dois")
+_POS_DRAW = {}
+
+
+def _others_needed(pos, key=None):
+    """Quantos OUTROS jogadores (além do líder) precisam ter entrado antes de nós. '2 ou 3' sorteia uma vez por
+    mobilização (key), para não mudar de ideia a cada olhada."""
+    if pos == "2 ou 3":
+        if key not in _POS_DRAW:
+            if len(_POS_DRAW) > 200:
+                _POS_DRAW.clear()
+            _POS_DRAW[key] = random.choice((1, 2))
+        return _POS_DRAW[key]
+    return {"1+": 0, "2+": 1, "3+": 2, "4": 3}.get(str(pos), 0)
+
+
+def _names(text):
+    return [norm(n) for n in re.split(r"[,;|\n]", str(text or "")) if n.strip()]
+
+
+def _squad_summary(n):
+    def f(s):
+        if not s.get(f"sq{n}_on", True):
+            return "não entra"
+        lo, hi = int(s.get(f"sq{n}_min", 0) or 0), int(s.get(f"sq{n}_max", 0) or 0)
+        lv = f"Nv {lo or 1}–{hi}" if hi else (f"Nv {lo}+" if lo else "qualquer nível")
+        return f"{lv} · posição {s.get(f'sq{n}_pos', '1+')}"
+    return f
+
+
 class AutoJoin(Task):
     id, name, icon, group = "auto_join", "Auto-Entrar em Rallies", "⚔", "Rallies & Eventos"
     description = "Quando aparece o alerta de rally (mira vermelha), abre a lista e entra nos rallies dos chefes " \
-                  "escolhidos pelo '+' verde; para se a fila de marcha estiver cheia; cura a cada N entradas."
+                  "escolhidos; cada esquadrão tem sua faixa de nível e sua posição na mobilização."
     default_interval = 0.5
     templates = [("rally_alert", "Ícone de mira vermelha com contador na lateral (há rallies ativos)"),
                  ("btn_join_rally", "Quadrado cinza com '+' verde: vaga para entrar no rally"),
@@ -790,32 +831,88 @@ class AutoJoin(Task):
     fields = [Field("any_boss", "Entrar em QUALQUER rally (ignora a lista de chefes)", "bool", False)] + \
              [Field(f"boss_{k}", n, "bool", k in ("gold", "marshal")) for k, n in RALLY_BOSSES] + [
         Field("daily_limit", "Limite de entradas/dia por chefe (0 = ∞)", "int", 0, minimum=0, maximum=999),
-        Field("max_level", "Nível máximo do chefe (0 = qualquer)", "int", 0, minimum=0, maximum=999),
-        Field("squad_order", "Ordem de esquadrões", "text", "3,2,4,1"),
-        Field("heal_after", "Curar a cada N entradas (0 = nunca)", "int", 10, minimum=0, maximum=100),
-        Field("delay_before", "Espera antes de entrar (s, parece humano)", "float", 0.0, minimum=0, maximum=30),
+        Field("max_level", "Nível máximo do chefe para todos (0 = qualquer)", "int", 0, minimum=0, maximum=999),
+        Field("squad_order", "Ordem de esquadrões (sem o esquadrão inteligente)", "text", "3,2,4,1"),
+        Field("smart_squad", "Esquadrão inteligente", "bool", True),
+    ] + [f for n in SQUADS for f in (
+        Field(f"sq{n}_on", f"Esquadrão {n} entra", "bool", True),
+        Field(f"sq{n}_min", f"Esquadrão {n}: nível mínimo do chefe (0 = qualquer)", "int", 0, minimum=0, maximum=999),
+        Field(f"sq{n}_max", f"Esquadrão {n}: nível máximo do chefe (0 = qualquer)", "int", 0, minimum=0, maximum=999),
+        Field(f"sq{n}_pos", f"Esquadrão {n}: posição na mobilização", "choice", "1+", options=POSITIONS,
+              hint=POSITION_HELP))] + [
+        Field("join_anyway", "Entrar mesmo assim se a posição não vier", "bool", True),
+        Field("join_anyway_s", "…depois de (s)", "int", 15, minimum=3, maximum=300),
+        Field("weak_ok", "Confirmar o aviso 'esquadrão fraco demais'", "bool", False),
+        Field("max_rally_min", "Ignorar mobilizações que faltam mais de (min, 0 = não ignorar)", "int", 0,
+              minimum=0, maximum=60),
+        Field("blacklist", "Lista negra: nunca entrar nas mobilizações destes jogadores (vírgula)", "text", ""),
+        Field("whitelist", "Lista branca: entrar mesmo fora das regras de nível e posição (vírgula)", "text", ""),
+        Field("check_digs", "Verificar escavações depois das entradas", "bool", True),
+        Field("heal_after", "Curar a cada N entradas — de (0 = nunca)", "int", 10, minimum=0, maximum=100),
+        Field("heal_after_max", "…até N entradas (sorteio)", "int", 15, minimum=0, maximum=100),
+        Field("heal_batch_min", "Curar em lotes de — mínimo (0 = tudo de uma vez)", "int", 0, minimum=0,
+              maximum=100000),
+        Field("heal_batch_max", "…máximo", "int", 0, minimum=0, maximum=100000),
+        Field("delay_before", "Espera antes de marchar (s)", "float", 0.0, minimum=0, maximum=30),
+        Field("delay_after", "Espera depois de cada entrada (s)", "float", 0.0, minimum=0, maximum=60),
     ]
     main_capable = True
     cards = [
         ("Chefes para entrar", [
             Card("Qualquer rally", "✱", "Entra em qualquer rally aberto, sem olhar o chefe.", toggle="any_boss",
                  summary=lambda s: "todos os rallies" if s["any_boss"] else "só os chefes ligados abaixo"),
-        ] + [Card(n, "☠", f"Rallies de {n}. Precisa da imagem 'rally_{k}'.", toggle=f"boss_{k}")
-             for k, n in RALLY_BOSSES]),
+        ] + [Card(n, "☠", f"Rallies de {n}. Acha pelo nome na linha (OCR) ou pela imagem 'rally_{k}'.",
+                  toggle=f"boss_{k}") for k, n in RALLY_BOSSES]),
+        ("Esquadrões", [
+            Card(f"Esquadrão {n}", "⚑", "Liga/desliga, faixa de nível do chefe e posição na mobilização. "
+                 + POSITION_HELP + ".", toggle=f"sq{n}_on", fields=[f"sq{n}_min", f"sq{n}_max", f"sq{n}_pos"],
+                 summary=_squad_summary(n)) for n in SQUADS
+        ] + [
+            Card("Esquadrão inteligente", "◎", "Ligado: vai o esquadrão de faixa de nível mais BAIXA que ainda serve "
+                 "para o chefe; os fortes ficam para os chefes grandes. Desligado: segue a ordem.",
+                 toggle="smart_squad", fields=["squad_order"],
+                 summary=lambda s: "o mais fraco que serve" if s["smart_squad"] else f"ordem {s['squad_order']}"),
+        ]),
         ("Durante as entradas", [
             Card("Limite diário", "⏳", "Máximo de entradas por dia em cada chefe.", fields=["daily_limit"],
                  summary=lambda s: f"no máximo {s['daily_limit']} por dia" if int(s["daily_limit"]) else "sem limite"),
-            Card("Nível máximo", "▲", "Entra no rally de MAIOR nível até este limite (lido na tela).",
+            Card("Nível máximo geral", "▲", "Teto para todos os esquadrões (lido na linha do rally).",
                  fields=["max_level"],
                  summary=lambda s: f"até Nv.{s['max_level']}" if int(s.get("max_level", 0) or 0) else "qualquer nível"),
-            Card("Esquadrões", "⚑", "Ordem de preferência dos esquadrões que entram.", fields=["squad_order"],
-                 summary="ordem {squad_order}"),
-            Card("Curar tropas", "✚", "Cura os feridos a cada algumas entradas.", fields=["heal_after"],
-                 summary=lambda s: f"a cada {s['heal_after']} entradas" if int(s["heal_after"]) else "nunca"),
-            Card("Esperas", "◷", "Espera antes de entrar, para parecer humano.", fields=["delay_before"],
-                 summary=lambda s: f"{float(s['delay_before']):g}s antes" if float(s["delay_before"]) else "sem espera"),
+            Card("Entrar mesmo assim", "↻", "Se a posição escolhida não vier a tempo, entra em qualquer posição livre "
+                 "(as regras de nível continuam valendo).", toggle="join_anyway", fields=["join_anyway_s"],
+                 summary=lambda s: f"após {s['join_anyway_s']} s" if s["join_anyway"] else "só na posição certa"),
+            Card("Esquadrões fracos também vão", "⚠", "Depois de Marchar, confirma o aviso 'seu esquadrão é fraco "
+                 "demais'.", toggle="weak_ok"),
+            Card("Mobilizações longas", "⌛", "Ignora mobilizações que ainda faltam muitos minutos para sair.",
+                 fields=["max_rally_min"],
+                 summary=lambda s: f"ignora > {s['max_rally_min']} min" if int(s["max_rally_min"]) else "entra em todas"),
+            Card("Verificar escavações", "⛏", "Depois das entradas dá uma passada nas escavações, ovos e presentes "
+                 "(usa as configurações de Escavações & Ovos).", toggle="check_digs"),
+            Card("Curar tropas", "✚", "Cura os feridos a cada algumas entradas (sorteio na faixa), em lotes para "
+                 "a aliança ajudar em cada um.",
+                 fields=["heal_after", "heal_after_max", "heal_batch_min", "heal_batch_max"],
+                 summary=lambda s: (f"a cada {s['heal_after']}–{max(s['heal_after'], s['heal_after_max'])} entradas"
+                                    + (f" · lotes {s['heal_batch_min']}–{s['heal_batch_max']}"
+                                       if int(s["heal_batch_min"]) else "")) if int(s["heal_after"]) else "nunca"),
+            Card("Esperas", "◷", "Esperas extras em volta de cada entrada (variam ±20 %).",
+                 fields=["delay_before", "delay_after"],
+                 summary=lambda s: (f"{float(s['delay_before']):g}s antes · {float(s['delay_after']):g}s depois"
+                                    if float(s["delay_before"]) or float(s["delay_after"]) else "sem espera")),
+        ]),
+        ("Listas de jogadores", [
+            Card("Lista negra", "⛔", "Nunca entra nas mobilizações destes jogadores (nomes separados por vírgula; "
+                 "basta um pedaço do nome).", fields=["blacklist"],
+                 summary=lambda s: f"{len(_names(s['blacklist']))} jogador(es)" if _names(s["blacklist"]) else "vazia"),
+            Card("Lista branca", "★", "Entra nas mobilizações destes jogadores mesmo fora das regras de nível e "
+                 "posição.", fields=["whitelist"],
+                 summary=lambda s: f"{len(_names(s['whitelist']))} jogador(es)" if _names(s["whitelist"]) else "vazia"),
         ]),
     ]
+
+    def __init__(self):
+        self._seen = {}        # mobilização -> primeira vez vista (para 'entrar mesmo assim')
+        self._next_heal = None
 
     def _open_list(self, ctx):
         """Atalho pelo alerta de rally; CONFIRMA que a lista abriu. O alerta às vezes leva ao mapa (Ponto de
@@ -837,30 +934,106 @@ class AutoJoin(Task):
             return False
         return bool(ctx.step("aba Guerra", lambda: ctx.tap("tab_alliance_war", 2, after=1.2), "alliance_war", 3))
 
-    def _boss_at(self, ctx, slot, s):
-        """Chefe da linha do '+' lendo o texto (OCR) à esquerda dele: (chave de RALLY_BOSSES, nível ou 0) ou
-        (None, 0). O nível vem de "Nv. 26" / "Lv.26"."""
+    @staticmethod
+    def _row(ctx, slot):
+        """Lê a linha do '+' (OCR à esquerda dele): chefe, nível ('Nv. 26'), quantos já entraram ('2/5'), quanto
+        falta para sair ('04:32') e o texto inteiro (para as listas de jogadores)."""
+        info = {"key": None, "lvl": 0, "joined": None, "left": None, "text": ""}
         if not ctx.ocr_on():
-            return None, 0
+            return info
         f = ctx.frame(fresh=False)
         h, w = f.shape[:2]
         x, y = slot
         region = (max(0.0, x / w - 0.45), max(0.0, y / h - 0.07), min(0.45, x / w), 0.14)
         t = norm(ctx.ocr.text(f, region))
-        m = re.search(r"\b(?:nv|lv|nivel)\s*(\d{1,3})\b", t)
-        lvl = int(m.group(1)) if m else 0
+        info["text"] = t
+        m = re.search(r"\b(?:nv|lv|nivel)\s*\.?\s*(\d{1,3})\b", t)
+        info["lvl"] = int(m.group(1)) if m else 0
+        m = re.search(r"\b(\d)\s*/\s*(\d)\b", t)
+        if m and 0 < int(m.group(2)) <= 9:
+            info["joined"] = int(m.group(1))
+        m = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b", t)
+        if m:
+            a, b, c = m.groups()
+            info["left"] = int(a) * 3600 + int(b) * 60 + int(c) if c else int(a) * 60 + int(b)
         for k, keys in RALLY_BOSS_TEXT.items():
             if any(kw in t for kw in keys):
-                return k, lvl
-        return None, lvl
+                info["key"] = k
+                break
+        return info
+
+    @staticmethod
+    def _squads_for(s, lvl, white):
+        """Esquadrões que podem ir num chefe deste nível, na ordem certa."""
+        order = [q for q in (parse_list(s["squad_order"]) or SQUADS) if q in SQUADS]
+        order += [q for q in SQUADS if q not in order]
+        ok = []
+        for q in order:
+            if not s.get(f"sq{q}_on", True):
+                continue
+            lo, hi = int(s.get(f"sq{q}_min", 0) or 0), int(s.get(f"sq{q}_max", 0) or 0)
+            if lvl and not white and ((lo and lvl < lo) or (hi and lvl > hi)):
+                continue
+            ok.append(q)
+        if s.get("smart_squad", True):  # o de faixa mais baixa que serve primeiro (sort é estável: empate = ordem)
+            ok.sort(key=lambda q: int(s.get(f"sq{q}_max", 0) or 0) or 10 ** 6)
+        return ok
+
+    def _pick(self, ctx, s, slots):
+        """Melhor vaga entre as visíveis: (nível, vaga, chefe, esquadrões) ou None."""
+        top = int(s.get("max_level", 0) or 0)
+        black, white = _names(s.get("blacklist")), _names(s.get("whitelist"))
+        limit = int(s["daily_limit"])
+        frame_h = ctx.frame(fresh=False).shape[0]
+        tmpl = {}  # chefe pela imagem capturada, se houver
+        for k, _ in RALLY_BOSSES:
+            if s.get(f"boss_{k}") and ctx.vision.has(f"rally_{k}"):
+                hit = ctx.find(f"rally_{k}", 0.84, text=False)
+                if hit:
+                    tmpl[k] = hit
+        cands, now = [], time.time()
+        for slot in slots:
+            r = self._row(ctx, slot)
+            key = next((k for k, hit in tmpl.items() if abs(hit[1] - slot[1]) < frame_h * 0.12), r["key"])
+            if not s["any_boss"] and (not key or not s.get(f"boss_{key}")):
+                continue
+            key = key or "any"
+            if limit and ctx.counters.get(f"join_{key}") >= limit:
+                continue
+            if any(b in r["text"] for b in black):
+                continue
+            is_white = any(n in r["text"] for n in white)
+            lvl = r["lvl"]
+            if top and lvl > top and not is_white:
+                continue
+            mx = int(s.get("max_rally_min", 0) or 0)
+            if mx and r["left"] and r["left"] > mx * 60:
+                continue
+            squads = self._squads_for(s, lvl, is_white)
+            if not squads:
+                continue
+            rid = (key, lvl, r["text"][:24])
+            if not is_white:
+                need = _others_needed(s.get(f"sq{squads[0]}_pos", "1+"), rid)
+                if need:
+                    first = self._seen.setdefault(rid, now)
+                    others = (r["joined"] - 1) if r["joined"] else None
+                    late = s.get("join_anyway", True) and now - first >= int(s.get("join_anyway_s", 15))
+                    if not ((others is not None and others >= need) or late):
+                        continue  # ainda não chegou a nossa posição
+            cands.append((lvl, slot, key, squads))
+        if len(self._seen) > 300:
+            self._seen.clear()
+        return max(cands, key=lambda c: c[0]) if cands else None
 
     def run(self, ctx, s):
         if not ctx.knows("btn_join_rally"):
             ctx.warn_once("join", "⚔ Capture 'btn_join_rally' (o '+' verde da vaga) no Estúdio")
             return
         if not self._open_list(ctx):
+            self._after(ctx, s)
             return
-        squads = parse_list(s["squad_order"]) or SQUADS
+        names = dict(RALLY_BOSSES)
         joined = False
         for _ in range(4):  # entra em até 4 rallies por execução (um por esquadrão)
             if ctx.vision.has("full_queue") and ctx.exists("full_queue", 0.85):
@@ -869,63 +1042,117 @@ class AutoJoin(Task):
             slots = ctx.find_all("btn_join_rally", 0.85)
             if not slots:
                 break
-            target, label, key = None, "rally", "any"
-            if s["any_boss"]:
-                target = slots[0]
-            else:
-                names = dict(RALLY_BOSSES)
-                for k, name in RALLY_BOSSES:
-                    if not s.get(f"boss_{k}") or not ctx.vision.has(f"rally_{k}"):
-                        continue
-                    if int(s["daily_limit"]) and ctx.counters.get(f"join_{k}") >= int(s["daily_limit"]):
-                        continue
-                    boss = ctx.find(f"rally_{k}", 0.84, text=False)
-                    if boss:  # a vaga '+' da mesma linha do chefe
-                        row = [j for j in slots if abs(j[1] - boss[1]) < ctx.frame(fresh=False).shape[0] * 0.12]
-                        if row:
-                            target, label, key = row[0], name, k
-                            break
-                if not target:  # sem imagem do chefe: lê nome e nível na linha de cada vaga
-                    top, cands = int(s.get("max_level", 0) or 0), []
-                    for slot in slots:
-                        k, lvl = self._boss_at(ctx, slot, s)
-                        if not k or not s.get(f"boss_{k}"):
-                            continue
-                        if int(s["daily_limit"]) and ctx.counters.get(f"join_{k}") >= int(s["daily_limit"]):
-                            continue
-                        if top and lvl > top:
-                            continue  # forte demais para as tropas
-                        cands.append((lvl, slot, k))
-                    if cands:  # o de maior nível que ainda cabe no limite rende mais
-                        lvl, target, key = max(cands, key=lambda c: c[0])
-                        label = names[key] + (f" Nv.{lvl}" if lvl else "")
-            if not target:
+            pick = self._pick(ctx, s, slots)
+            if not pick:
                 break
-            if float(s["delay_before"]):
-                ctx.sleep(float(s["delay_before"]))
+            lvl, target, key, squads = pick
+            label = names.get(key, "rally") + (f" Nv.{lvl}" if lvl else "")
             ctx.tap_xy(*target, spread=2)
             ctx.sleep(1.0)
-            sq = march(ctx, squads)
+            if float(s["delay_before"]):
+                ctx.sleep(float(s["delay_before"]) * random.uniform(0.8, 1.2))
+            sq = march(ctx, squads, weak_ok=s.get("weak_ok", False))
             if not sq:
                 ctx.back()
                 break
             joined = True
             n = ctx.counters.add(f"join_{key}")
-            total = ctx.counters.add("joins_total")
+            ctx.counters.add("joins_total")
             ctx.log(f"⚔ Entrou no rally {label} (esq. {sq}) — {n} hoje")
             ctx.sleep(1.5)
-            if int(s["heal_after"]) and total % int(s["heal_after"]) == 0:
-                heal(ctx)
+            if float(s.get("delay_after", 0)):
+                ctx.sleep(float(s["delay_after"]) * random.uniform(0.8, 1.2))
+            if self._heal_due(ctx, s):
+                heal_troops(ctx, s.get("heal_batch_min", 0), s.get("heal_batch_max", 0))
                 break
         ctx.go_home()
+        self._after(ctx, s)
         return joined
+
+    def _heal_due(self, ctx, s):
+        lo = int(s.get("heal_after", 0) or 0)
+        if not lo:
+            return False
+        total = ctx.counters.get("joins_total")
+        if self._next_heal is None or self._next_heal < total - 100 or self._next_heal > total + 200:
+            self._next_heal = total + random.randint(lo, max(lo, int(s.get("heal_after_max", lo) or lo)))
+        if total >= self._next_heal:
+            self._next_heal = None
+            return True
+        return False
+
+    @staticmethod
+    def _after(ctx, s):
+        """Depois das entradas: uma passada nas escavações/ovos/presentes (usa as configurações delas)."""
+        if s.get("check_digs", True):
+            check_digs(ctx)
+
+
+def check_digs(ctx):
+    """Passada rápida em escavações, ovos e presentes no meio de outra tarefa (configurações de Escavações & Ovos).
+    A escavação devolve a vez sozinha quando o cronômetro ainda está longe."""
+    dig = ctx.e.task_by_id("auto_digs")
+    if not dig:
+        return False
+    try:
+        return bool(dig.run(ctx, ctx.e.cfg.task(dig.id, dig.defaults())))
+    except RuntimeError:
+        return False
+
+
+def heal_troops(ctx, batch_min=0, batch_max=0, ask_help=True):
+    """Cura pela ambulância do HUD do mapa (fluxo do LWFarmBot): coleta os já curados, abre, põe a quantidade do
+    lote (se pedido), Curar e toca de novo na ambulância para pedir ajuda da aliança. Sem a ambulância (IA
+    desligada / outra versão), cai no Hospital da base."""
+    if ctx.ai_on("hospital_icon") and ctx.to_world():
+        for _ in range(2):  # soldados já curados primeiro (senão a ambulância só mostra a cura pronta)
+            done = ctx.ai("healed_troops", ctx.frame())
+            if not done:
+                break
+            ctx.tap_xy(done[0][0], done[0][1], spread=2)
+            ctx.sleep(1.0)
+            ctx.log("✚ Soldados curados coletados")
+        amb = ctx.ai("hospital_icon", ctx.frame())
+        if not amb:
+            ctx.go_home()
+            return False  # sem ambulância = ninguém ferido
+        ax, ay = amb[0][0], amb[0][1]
+        ctx.tap_xy(ax, ay, spread=2)
+        ctx.sleep(1.2)
+        lo, hi = int(batch_min or 0), int(batch_max or 0)
+        if lo:
+            n = random.randint(lo, max(lo, hi))
+            box = ctx.ai("heal_input", ctx.frame())
+            if box:
+                ctx.tap_xy(box[0][0], box[0][1], spread=1)
+                ctx.sleep(0.3)
+                for _ in range(7):
+                    ctx.key("backspace")
+                ctx.type(str(n))
+                ctx.key("enter")
+                ctx.sleep(0.4)
+        if not ctx.tap("btn_heal", 2, after=1.0):
+            ctx.log("✚ Hospital aberto, mas sem botão Curar (cura em andamento ou faltam recursos)")
+            ctx.go_home()
+            return False
+        ctx.counters.add("heals")
+        ctx.log("✚ Feridos em cura" + (f" (lote de {n})" if lo else ""))
+        if ask_help and ctx.ai("hospital_icon", ctx.frame()):
+            ctx.tap_xy(ax, ay, spread=2)  # de novo na ambulância = pedir ajuda da aliança
+            ctx.sleep(0.8)
+        ctx.go_home()
+        return True
+    ctx.to_base()
+    ok = bool(ctx.tap("btn_hospital", 2) and ctx.tap("btn_heal", 2))
+    if ok:
+        ctx.counters.add("heals")
+        ctx.log("✚ Tropas curadas")
+    ctx.go_home()
+    return ok
 
 
 def heal(ctx):
-    ctx.to_base()
-    if ctx.tap("btn_hospital", 2) and ctx.tap("btn_heal", 2):
-        ctx.log("✚ Tropas curadas")
-    ctx.go_home()
+    return heal_troops(ctx)
 
 
 class Hunt(Task):
@@ -1463,6 +1690,8 @@ class BaseCare(Task):
                  ("bubble_research_idle", "Balão do laboratório parado (sem pesquisa)")]
     fields = [Field("heal", "Curar feridos", "bool", True),
               Field("heal_help", "Pedir ajuda da aliança na cura", "bool", True),
+              Field("heal_batch_min", "Curar em lotes de — mínimo (0 = tudo)", "int", 0, minimum=0, maximum=100000),
+              Field("heal_batch_max", "…máximo", "int", 0, minimum=0, maximum=100000),
               Field("train", "Treinar quando o quartel estiver parado", "bool", False),
               Field("research", "Pesquisar quando o laboratório estiver parado", "bool", False)]
     cards = [("Hospital", [
@@ -1470,6 +1699,10 @@ class BaseCare(Task):
                                    "jogo sugerir). Nunca toca em 'Terminar agora'.", toggle="heal"),
         Card("Ajuda na cura", "🤝", "Depois de curar, toca na ambulância de novo para pedir ajuda da aliança.",
              toggle="heal_help"),
+        Card("Curar em lotes", "▦", "Curas menores terminam mais rápido e a aliança ajuda em cada uma "
+             "(sorteio entre o mínimo e o máximo; 0 = tudo de uma vez).", fields=["heal_batch_min", "heal_batch_max"],
+             summary=lambda s: f"lotes de {s['heal_batch_min']}–{s['heal_batch_max']}" if int(s["heal_batch_min"])
+             else "tudo de uma vez"),
     ]), ("Base parada", [
         Card("Treino", "⚒", "Quando o quartel estiver parado: abre e toca em Treinar. Precisa da imagem do balão do "
                             "quartel parado (Estúdio de imagens → 'bubble_train_idle').", toggle="train"),
@@ -1478,31 +1711,7 @@ class BaseCare(Task):
     ])]
 
     def _heal(self, ctx, s):
-        if not ctx.to_world():
-            return
-        for _ in range(2):  # soldados já curados: coleta antes (senão a ambulância só mostra a cura pronta)
-            done = ctx.ai("healed_troops", ctx.frame())
-            if not done:
-                break
-            ctx.tap_xy(done[0][0], done[0][1], spread=2)
-            ctx.sleep(1.0)
-            ctx.log("✚ Soldados curados coletados")
-        amb = ctx.ai("hospital_icon", ctx.frame())
-        if not amb:
-            return  # sem ambulância = ninguém ferido
-        ax, ay = amb[0][0], amb[0][1]
-        ctx.tap_xy(ax, ay, spread=2)
-        ctx.sleep(1.2)
-        if not ctx.tap("btn_heal", 2, after=1.0):
-            ctx.log("✚ Hospital aberto, mas sem botão Curar (cura em andamento ou faltam recursos)")
-            ctx.go_home()
-            return
-        ctx.counters.add("heals")
-        ctx.log("✚ Feridos em cura")
-        if s["heal_help"] and ctx.ai("hospital_icon", ctx.frame()):
-            ctx.tap_xy(ax, ay, spread=2)  # de novo na ambulância = pedir ajuda da aliança
-            ctx.sleep(0.8)
-        ctx.go_home()
+        heal_troops(ctx, s.get("heal_batch_min", 0), s.get("heal_batch_max", 0), ask_help=s["heal_help"])
 
     def _idle_building(self, ctx, bubble, go, counter, label):
         if not ctx.vision.has(bubble):

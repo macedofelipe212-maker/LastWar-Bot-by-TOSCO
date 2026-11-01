@@ -103,7 +103,7 @@ YOLO_TARGETS = {
     "btn_rally": ["rally_btn", "Rally Button"], "btn_attack": ["attack_btn"], "btn_battle": ["fight_btn"],
     "btn_challenge": ["challenge_btn"], "btn_heal": ["heal_btn"], "btn_hospital": ["Hospital"],
     # cura pelo mapa (LWFarmBot auto_heal): ambulância no HUD do Mundo e soldados curados prontos para coletar
-    "hospital_icon": ["health_icon"], "healed_troops": ["health_icon_troops"],
+    "hospital_icon": ["health_icon"], "healed_troops": ["health_icon_troops"], "heal_input": ["heal_input"],
     # heróis: botão Recrutar Heróis, abas de recrutamento e tiragem x1 (a grátis fica nela)
     "recruit_tab": ["recruit_tab"], "recruit_x1": ["recruit_x1"],
     # outros
