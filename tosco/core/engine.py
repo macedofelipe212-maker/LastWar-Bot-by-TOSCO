@@ -31,7 +31,8 @@ class TaskTimeout(Exception):
 
 
 # Alvos que vivem na faixa do chat (ou logo acima dela): não são filtrados na tela principal
-CHAT_BAND_OK = ("btn_chat", "gift_alert", "dig_alert", "fire_alert", "btn_to_world", "btn_to_base")
+CHAT_BAND_OK = ("btn_chat", "gift_alert", "dig_alert", "fire_alert", "btn_to_world", "btn_to_base",
+                "btn_heroes")  # HEROES fica no canto de baixo, na mesma faixa do chat (como o MUNDO/BASE)
 # Abas do chat aberto (ficam no topo do painel); a caixa de digitar (chat_input) não entra: ela fica embaixo
 # e é sinal confiável de chat aberto
 CHAT_TABS = ("chat_ally", "chat_world", "chat_moment", "chat_private")

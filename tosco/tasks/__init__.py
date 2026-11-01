@@ -14,6 +14,7 @@ import random
 import re
 import time
 
+import cv2
 import numpy as np
 
 from ..core import catalog, rapid, tesseract
@@ -2595,44 +2596,152 @@ class MapScanner(Task):
             self._close_panels(ctx)
         return False
 
-    def _goto_once(self, ctx, x, y):
-        """Lupa → campos X e Y (IA coord_input, da esquerda para a direita) → Ir. O mapa centraliza na casa."""
+    # Barra de coordenadas da busca (medido no jogo, PC 1600×900): fica no topo, à esquerda da lupinha azul
+    # (coord_search_icon); o campo X está ~0,207 da ALTURA da tela à esquerda do ícone e o Y ~0,082 (a interface
+    # escala pela altura). Abre já preenchida com a posição da câmera; tocar no campo apaga o valor.
+    BAR_X, BAR_Y, BAR_DY = 0.207, 0.082, 0.012
+
+    def _bar_icon(self, ctx, f=None):
+        f = ctx.frame() if f is None else f
+        return ctx.seen("coord_search_icon", 0.3, f)
+
+    @staticmethod
+    def _read_numbers(crop):
+        """Candidatos para o número de um campo, do mais provável ao menos (ver _read_number)."""
+        if crop is None or crop.size == 0 or not rapid.available():
+            return []
+        big = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        g = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+        _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        score = {}
+        # ordem = desempate: preto-e-branco acerta o dígito que a imagem crua come (417 → 47)
+        for prio, img in enumerate((cv2.cvtColor(th, cv2.COLOR_GRAY2BGR), cv2.cvtColor(g, cv2.COLOR_GRAY2BGR), big)):
+            for t in rapid.read(img, rec_only=True):
+                d = re.sub(r"\D", "", t)
+                if d and len(d) <= 4 and int(d) < 3000:
+                    c, p0, ln = score.get(int(d), (0, 9, 0))
+                    score[int(d)] = (c + 1, min(p0, prio), len(d))
+        return sorted(score, key=lambda n: (-score[n][0], score[n][1], -score[n][2]))
+
+    @classmethod
+    def _read_number(cls, crop):
+        """Número de um campo da barra. Medido no jogo: lendo a imagem crua o RapidOCR às vezes come um dígito
+        (417 → 47) e em preto-e-branco (Otsu) acerta esse mas estraga outros (77 → lixo). Lê das três formas e
+        fica com o que mais se repete (empate: preto-e-branco, depois o mais comprido)."""
+        c = cls._read_numbers(crop)
+        return c[0] if c else None
+
+    def _read_bar(self, ctx, f, icon):
+        """X e Y escritos na barra: cada campo recortado pela IA (coord_input) ou pela posição medida."""
+        h, w = f.shape[:2]
+        boxes = sorted(ctx.dets(f, 0.4).get("coord_input", []), key=lambda b: b[0])[:2]
+        if len(boxes) < 2:  # sem os dois campos da IA: posição medida a partir da lupinha
+            bw, bh = 0.08 * h, 0.034 * h
+            boxes = [(icon[0] - dx * h, icon[1] - self.BAR_DY * h, 0, bw, bh) for dx in (self.BAR_X, self.BAR_Y)]
+        cands = []
+        for x, y, _, bw, bh in boxes:
+            crop = f[max(0, int(y - bh / 2)):int(y + bh / 2), max(0, int(x - bw / 2)):int(x + bw / 2)]
+            cands.append(self._read_numbers(crop))
+        self._bar_cands = cands  # para validar a cidade tentando as alternativas
+        if all(cands):
+            return cands[0][0], cands[1][0]
+        if ctx.ocr_on():
+            return ctx.ocr.coords(f, (max(0.0, icon[0] / w - 0.2), max(0.0, icon[1] / h - 0.04), 0.2, 0.06))
+        return None
+
+    def _open_search(self, ctx):
+        """Abre a busca da lupa e devolve o ícone da barra de coordenadas (ou None)."""
         if not ctx.tap("btn_search", 2, after=1.0):
+            return None
+        for _ in range(4):
+            icon = self._bar_icon(ctx)
+            if icon:
+                return icon
+            ctx.sleep(0.4, human=False)
+        return None
+
+    def _camera_xy(self, ctx):
+        """Posição atual da câmera (lida na barra da busca) e fecha a busca."""
+        icon = self._open_search(ctx)
+        if not icon:
+            return None
+        reads = []
+        for _ in range(3):  # o OCR às vezes troca 4 por 1: fica com a leitura que se repete
+            xy = self._read_bar(ctx, ctx.frame(), icon)
+            if xy:
+                reads.append(tuple(xy))
+            ctx.sleep(0.2, human=False)
+        self._close_panels(ctx)
+        if not reads:
+            return None
+        best = max(set(reads), key=reads.count)
+        return best if reads.count(best) >= 2 or len(reads) == 1 else None
+
+    def _goto_once(self, ctx, x, y):
+        """Lupa → campo X (toque apaga) → digita → campo Y → digita → lupinha azul. O mapa centraliza na casa."""
+        icon = self._open_search(ctx)
+        if not icon:
             return False
-        boxes = sorted(ctx.ai("coord_input", ctx.frame()), key=lambda b: b[0])[:2]
-        if len(boxes) < 2:
-            return False
-        for b, v in zip(boxes, (x, y)):
-            ctx.tap_xy(b[0], b[1], spread=1)
-            ctx.sleep(0.25)
-            ctx.tap_xy(b[0], b[1], spread=1)  # 2º toque: tira o foco do campo anterior
-            ctx.sleep(0.25)
+        h = ctx.frame(fresh=False).shape[0]
+        yy = int(icon[1] - self.BAR_DY * h)
+        for dx, v in ((self.BAR_X, x), (self.BAR_Y, y)):
+            ctx.tap_xy(int(icon[0] - dx * h), yy, spread=0)
+            ctx.sleep(0.5)
             for _ in range(5):
                 ctx.key("backspace")
             ctx.type(str(int(v)))
             ctx.sleep(0.2)
-        if not ctx.tap("btn_coord_go", 1.5, after=1.2):
             ctx.key("enter")
-            ctx.sleep(1.2)
-        for _ in range(6):  # confirma que saiu da tela de busca
-            f = ctx.frame()
-            if not ctx.ai("coord_input", f):
+            ctx.sleep(0.4)
+        icon = self._bar_icon(ctx) or icon
+        ctx.tap_xy(int(icon[0]), int(icon[1]), spread=0)
+        ctx.sleep(1.2)
+        for _ in range(6):  # confirma que saiu da busca
+            if not self._bar_icon(ctx):
                 ctx.sleep(0.6, human=False)  # o mapa ainda desliza um pouco
                 return True
             ctx.sleep(0.5, human=False)
-        ctx.press_back()
         return False
 
     def _my_city(self, ctx):
-        """Coordenadas da sua cidade: o mapa abre centrado nela; toca no centro e lê 'X:… Y:…' da ficha."""
-        f = ctx.frame()
-        cx, cy = self._center(f)
-        ctx.tap_xy(int(cx), int(cy), spread=1)
-        ctx.sleep(1.2)
-        xy = ctx.ocr.coords(ctx.frame()) if ctx.ocr_on() else None
-        ctx.press_back()
-        ctx.sleep(0.5)
+        """Coordenadas da sua cidade: a casinha do mapa (home_btn, 'N km') centraliza a câmera nela; depois lê a
+        posição da câmera na barra da busca. (A ficha da cidade não mostra X/Y.)"""
+        hb = ctx.seen("home_btn", 0.5, ctx.frame())
+        if hb:
+            ctx.tap_xy(int(hb[0]), int(hb[1]), spread=1)
+            ctx.sleep(2.0)
+        ref = ctx.frame()
+        xy = self._camera_xy(ctx)
+        cands = getattr(self, "_bar_cands", None) or []
+        pairs = [xy] if xy else []
+        if len(cands) == 2:  # alternativas do OCR, caso a primeira leitura esteja errada
+            pairs += [(a, b) for a in cands[0][:2] for b in cands[1][:3] if (a, b) not in pairs]
+        for p in pairs[:5]:
+            # confere: pula para o X/Y lido e procura o meio da tela de chegada na imagem da cidade (o pulo
+            # aproxima o zoom; _same_place compara em várias escalas)
+            if not self._goto(ctx, *p):
+                continue
+            here = ctx.frame()
+            if self._same_place(ref, here):
+                return p
+            ctx.log(f"◎ Leitura X:{p[0]} Y:{p[1]} não bate com a cidade — tentando outra", "warn")
         return xy
+
+    @staticmethod
+    def _same_place(a, b):
+        """As duas imagens mostram o mesmo lugar? (zoom pode diferir: compara em escala de cinza reduzida, com
+        busca em algumas escalas)."""
+        ga = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+        gb = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
+        h, w = ga.shape
+        core = gb[int(h * 0.3):int(h * 0.7), int(w * 0.3):int(w * 0.7)]  # meio da tela depois do pulo
+        best = 0.0
+        for k in (1.0, 0.85, 0.7, 0.6, 0.5):
+            t = cv2.resize(core, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+            if t.shape[0] >= h or t.shape[1] >= w:
+                continue
+            best = max(best, float(cv2.minMaxLoc(cv2.matchTemplate(ga, t, cv2.TM_CCOEFF_NORMED))[1]))
+        return best >= 0.55
 
     def _calibrate(self, ctx, s, x0, y0):
         """Quantos pixels vale 1 casa em X e em Y nesta janela e neste zoom (pula +D casas e mede o deslocamento
@@ -2645,24 +2754,34 @@ class MapScanner(Task):
             cal = {}
         if cal.get("key") == key and "m" in cal:
             return np.array(cal["m"], float)
-        D = 6
+        # Poucas casas: o pulo pela busca APROXIMA o zoom (1 casa ≈ 70 px em 1600×900) e a correlação de fase só
+        # mede deslocamentos menores que meia janela — com 6 casas a medida vertical "dobrava" e saía errada.
         if not self._goto(ctx, x0, y0):
             return None
         a = ctx.frame()
         vecs = []
-        for dx, dy in ((D, 0), (0, D)):
-            if not self._goto(ctx, x0 + dx, y0 + dy):
+        for axis in (0, 1):
+            got = None
+            for D in (3, 2):
+                if not self._goto(ctx, x0 + (D if axis == 0 else 0), y0 + (D if axis == 1 else 0)):
+                    continue
+                b = ctx.frame()
+                mx, my, resp = measure_shift(a, b)
+                self._goto(ctx, x0, y0)
+                a = ctx.frame()
+                if resp >= 0.1 and abs(mx) + abs(my) >= 4:
+                    got = (-mx / D, -my / D)  # a casa +D estava em -deslocamento na tela de antes
+                    break
+                ctx.log(f"◎ Calibração: medida fraca ({mx:.0f},{my:.0f} px, confiança {resp:.2f}) — refazendo", "warn")
+            if not got:
+                ctx.log("◎ Calibração falhou", "warn")
                 return None
-            b = ctx.frame()
-            mx, my, resp = measure_shift(a, b)
-            if resp < 0.03 or abs(mx) + abs(my) < 4:
-                ctx.log(f"◎ Calibração falhou (deslocamento {mx:.0f},{my:.0f}, confiança {resp:.2f})", "warn")
-                return None
-            vecs.append((-mx / D, -my / D))  # a casa +D estava em -deslocamento na tela de antes
-            self._goto(ctx, x0, y0)
-            a = ctx.frame()
+            vecs.append(got)
         m = np.array([[vecs[0][0], vecs[1][0]], [vecs[0][1], vecs[1][1]]], float)  # casas → pixels
-        if abs(np.linalg.det(m)) < 1e-3:
+        v1, v2 = np.array(vecs[0]), np.array(vecs[1])
+        cos = abs(v1 @ v2) / max(1e-6, np.linalg.norm(v1) * np.linalg.norm(v2))
+        if abs(np.linalg.det(m)) < 1e-3 or cos > 0.7:  # X e Y quase na mesma direção = medida errada
+            ctx.log(f"◎ Calibração recusada: direções X e Y quase paralelas ({vecs[0]}, {vecs[1]})", "warn")
             return None
         s["calib"] = json.dumps({"key": key, "m": m.tolist()})
         ctx.log(f"◎ Calibrado: 1 casa X = ({vecs[0][0]:.1f}, {vecs[0][1]:.1f}) px · "
@@ -2684,7 +2803,7 @@ class MapScanner(Task):
         n = max(0, int(np.ceil(max(0.0, radius - half) / step)))
         pts = [(int(round(cx + i * step)), int(round(cy + j * step)))
                for i in range(-n, n + 1) for j in range(-n, n + 1)]
-        pts = [(x, y) for x, y in pts if 0 <= x <= 2999 and 0 <= y <= 2999]
+        pts = [(x, y) for x, y in pts if 0 <= x <= 999 and 0 <= y <= 999]  # servidor: 1000×1000 casas
         return sorted(set(pts), key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
 
     def _hits(self, ctx, f, cat, s):
