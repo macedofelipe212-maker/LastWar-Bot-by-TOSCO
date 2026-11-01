@@ -62,6 +62,7 @@ class ScanStore:
         self.pinned = set(d.get("pinned", []))
         self.hidden = set(d.get("hidden", []))
         self.last_scan = d.get("last_scan")
+        self.queue = d.get("queue", [])  # tarefas secretas para voltar mais tarde: [{"gx", "gy", "at"}]
         self.version = 0
 
     def save(self):
@@ -69,13 +70,15 @@ class ScanStore:
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"items": self.items, "pinned": sorted(self.pinned), "hidden": sorted(self.hidden),
-                           "last_scan": self.last_scan}, f, ensure_ascii=False)
+                           "last_scan": self.last_scan, "queue": self.queue}, f, ensure_ascii=False)
             os.replace(tmp, self.path)
             self.version += 1
 
     def begin_scan(self):
         with self._lock:  # mantém fixados e favoritados no jogo; o resto é refeito
-            self.items = {k: v for k, v in self.items.items() if k in self.pinned or v.get("fav")}
+            # mantém fixados, favoritados e tarefas já compartilhadas/coletadas (não repete)
+            self.items = {k: v for k, v in self.items.items()
+                          if k in self.pinned or v.get("fav") or v.get("shared") or v.get("plunders")}
 
     def add(self, cat, px, py, frame_w, score, label="", gx=None, gy=None, origin=None):
         """gx, gy: casa real do mapa (varredura por coordenadas; distância em casas a partir de origin).

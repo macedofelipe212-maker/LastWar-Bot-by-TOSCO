@@ -2477,6 +2477,30 @@ class Reports(Task):
         s["last_run"] = f"{dt.datetime.now():%Y-%m-%d %H:%M}"
 
 
+MAP_TASK_WHEN = ["durante o scan", "durante o scan e voltar depois nas que não estão prontas",
+                 "depois do scan e voltar depois nas que não estão prontas"]
+MAP_TASK_FIELDS = [
+    Field("ts_share", "Tarefas secretas: compartilhar com a aliança", "bool", False),
+    Field("ts_collect", "Tarefas secretas: coletar (saquear) as prontas", "bool", False),
+    Field("ts_ur", "Compartilhar: UR", "bool", True), Field("ts_ssr", "Compartilhar: SSR", "bool", False),
+    Field("ts_sr", "Compartilhar: SR", "bool", False),
+    Field("ts_min_level", "Compartilhar: nível mínimo", "int", 5, minimum=0, maximum=10),
+    Field("ts_special", "Compartilhar: só especiais", "bool", False),
+    Field("tc_ur", "Coletar: UR", "bool", True), Field("tc_ssr", "Coletar: SSR", "bool", True),
+    Field("tc_sr", "Coletar: SR", "bool", False),
+    Field("tc_min_level", "Coletar: nível mínimo", "int", 5, minimum=0, maximum=10),
+    Field("tc_special", "Coletar: só especiais", "bool", False),
+    Field("ts_when", "Quando compartilhar", "choice", MAP_TASK_WHEN[0], options=MAP_TASK_WHEN),
+    Field("tc_daily", "Coletas por dia (o jogo limita)", "int", 5, minimum=0, maximum=50),
+    Field("ts_daily", "Compartilhamentos por dia", "int", 20, minimum=0, maximum=200),
+    Field("gh_share", "Missões fantasmas: compartilhar", "bool", False),
+    Field("gh_collect", "Missões fantasmas: coletar", "bool", False),
+    Field("gh_ssr", "Missões fantasmas: também SSR (UR sempre)", "bool", False),
+]
+MAP_TASK_CLASSES = ("task_map", "Secret Task", "Secret Task non-ally")  # as da sua aliança ficam de fora
+SHARE_BEFORE_S = 600  # pronta para compartilhar: termina em 10 min ou menos (ou já terminou)
+
+
 class MapScanner(Task):
     id, name, icon, group = "map_scanner", "Scanner de Mapa", "◎", "Relatórios & Mapa"
     description = "Varre uma área do mapa (centro + raio) pulando por coordenadas pela busca do jogo e lista " \
@@ -2499,7 +2523,7 @@ class MapScanner(Task):
                     minimum=0, maximum=40),
               Field("threshold", "Limiar das suas imagens map_…", "float", 0.84, minimum=0.6, maximum=0.98),
               Field("read_labels", "Ler texto ao lado do ícone", "bool", True),
-              Field("calib", "Calibração (automática)", "text", "")]
+              Field("calib", "Calibração (automática)", "text", "")] + MAP_TASK_FIELDS
     store = ScanStore()
 
     def defaults(self):
@@ -2696,6 +2720,10 @@ class MapScanner(Task):
             return
         ctx.log("◎ Procurando: " + ", ".join(CAT_NAMES[k] for k in cats))
         f = self._home(ctx, s)
+        if self._tasks_on(s) and self.store.queue and self._due_queue():
+            m0 = self._cached_calib(s, f)
+            if m0 is not None:  # volta nas tarefas que ficaram para depois, antes de varrer de novo
+                self._run_queue(ctx, s, np.linalg.inv(m0), self._view_tiles(m0, f.shape[1], f.shape[0]))
         if s.get("center") == "coordenadas abaixo":
             c = (int(s["cx"]), int(s["cy"]))
         else:
@@ -2743,12 +2771,19 @@ class MapScanner(Task):
                     st.add(cat, x - x0, y - y0, w, score, self._label(ctx, s, f, x, y, tw, th),
                            gx=ix, gy=iy, origin=c)
                     found += 1
+            if self._tasks_on(s) and not s.get("ts_when", MAP_TASK_WHEN[0]).startswith("depois"):
+                self._map_tasks(ctx, s, gx, gy, inv, half)
             if i % 5 == 0:
                 st.save()
                 ctx.log(f"◎ {i}/{len(pts)} pulos · {len(st.items)} itens")
         st.last_scan = time.time()
         st.save()
         ctx.log(f"◎ Varredura concluída: {len(st.items)} itens ({found} detecções)")
+        if self._tasks_on(s) and s.get("ts_when", MAP_TASK_WHEN[0]).startswith("depois"):
+            for it in [v for v in st.items.values() if v["cat"] == "mission" and v.get("gx") is not None]:
+                self._enqueue(it["gx"], it["gy"], 0)
+        if self._tasks_on(s):
+            self._run_queue(ctx, s, inv, half)
 
     @staticmethod
     def _move(ctx, prev, dx_px, dy_px):
@@ -2795,6 +2830,214 @@ class MapScanner(Task):
         st.last_scan = time.time()
         st.save()
         ctx.log(f"◎ Varredura concluída: {len(st.items)} itens ({found} detecções)")
+
+    # --- tarefas secretas no mapa (compartilhar / coletar) -------------------
+    @staticmethod
+    def _tasks_on(s):
+        return any(s.get(k) for k in ("ts_share", "ts_collect", "gh_share", "gh_collect"))
+
+    @staticmethod
+    def _cached_calib(s, f):
+        try:
+            cal = json.loads(s.get("calib") or "{}")
+        except ValueError:
+            return None
+        return np.array(cal["m"], float) if cal.get("key") == f"{f.shape[1]}x{f.shape[0]}" and "m" in cal else None
+
+    def _enqueue(self, gx, gy, ready_at):
+        q = self.store.queue
+        for it in q:
+            if abs(it["gx"] - gx) <= 2 and abs(it["gy"] - gy) <= 2:
+                it["at"] = min(it["at"], ready_at) if it["at"] else ready_at
+                return
+        q.append({"gx": int(gx), "gy": int(gy), "at": float(ready_at)})
+
+    def _due_queue(self):
+        now = time.time()
+        return [it for it in self.store.queue if it["at"] <= now]
+
+    def _card(self, ctx):
+        """Lê a ficha aberta: raridade, nível (estrelas), especial, missão fantasma, tempo restante e os botões."""
+        f = ctx.frame()
+        d = ctx.dets(f, 0.3)
+        info = {"rar": None, "level": 0, "special": False, "ghost": False, "left": None,
+                "share": None, "plunder": None, "plunder_off": False, "open": False}
+        card = (d.get("task_card") or [None])[0]
+        info["share"] = (d.get("share_btn") or [None])[0]
+        info["plunder"] = (d.get("plunder_btn") or [None])[0]
+        info["plunder_off"] = bool(d.get("plunder_btn_off"))
+        info["open"] = bool(card or info["share"] or info["plunder"] or info["plunder_off"])
+        if not info["open"]:
+            return info
+        inside = (lambda b: _box_has(card, b)) if card else (lambda b: True)
+        for r in RARITIES:
+            if any(inside(b) for b in d.get(f"secret_rarity_{r.lower()}", [])):
+                info["rar"] = r
+                break
+        red = sum(1 for b in d.get("secret_star_red", []) if inside(b))
+        yel = sum(1 for b in d.get("secret_star_yellow", []) if inside(b))
+        info["level"] = 5 + red if red else yel
+        info["special"] = any(inside(b) for b in d.get("secret_special_badge", []))
+        if ctx.ocr_on():
+            h, w = f.shape[:2]
+            region = ((max(0.0, (card[0] - card[3] / 2) / w), max(0.0, (card[1] - card[4] / 2) / h),
+                       min(1.0, card[3] / w), min(1.0, card[4] / h)) if card else (0.2, 0.15, 0.6, 0.7))
+            raw = ctx.ocr.text(f, region)
+            t = norm(raw)
+            if not info["rar"]:
+                m = re.search(r"\b(UR|SSR|SR)\b", raw.upper())
+                info["rar"] = m.group(1) if m else None
+            if not info["level"]:
+                m = re.search(r"\b(?:nv|lv|nivel)\s*(\d{1,2})\b", t)
+                info["level"] = int(m.group(1)) if m else 0
+            info["special"] = info["special"] or "especial" in t or "special" in t
+            info["ghost"] = any(k in t for k in ("fantasma", "ghost", "phantom"))
+            m = re.search(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b", raw)
+            if m:
+                a, b, c = m.groups()
+                info["left"] = int(a) * 3600 + int(b) * 60 + int(c) if c else int(a) * 60 + int(b)
+        return info
+
+    @staticmethod
+    def _wants(s, info, prefix):
+        """A tarefa passa nos critérios de compartilhar (ts) ou coletar (tc)?"""
+        if info["ghost"]:
+            key = "gh_share" if prefix == "ts" else "gh_collect"
+            return bool(s.get(key)) and (info["rar"] in (None, "UR") or (info["rar"] == "SSR" and s.get("gh_ssr")))
+        if not s.get("ts_share" if prefix == "ts" else "ts_collect"):
+            return False
+        if info["rar"] and not s.get(f"{prefix}_{info['rar'].lower()}"):
+            return False
+        if info["level"] and info["level"] < int(s.get(f"{prefix}_min_level", 0) or 0):
+            return False
+        if s.get(f"{prefix}_special") and not info["special"]:
+            return False
+        return True
+
+    def _close_card(self, ctx):
+        for _ in range(3):
+            f = ctx.frame()
+            if ctx.find("dlg_exit_game", frame=f):
+                ctx.tap("btn_exit_cancel", 1.0)
+                continue
+            d = ctx.dets(f, 0.35)
+            if not any(k in d for k in ("task_card", "share_btn", "plunder_btn", "plunder_btn_off", "share_popup",
+                                        "share_alliance_row", "share_confirm_btn")):
+                return
+            hit = (d.get("tap_close_text") or [None])[0]
+            if hit:
+                ctx.tap_xy(hit[0], hit[1], spread=2)
+            else:
+                ctx.key("esc")
+            ctx.sleep(0.6)
+
+    def _share(self, ctx, s, info):
+        """Compartilhar → linha da sua aliança → Confirmar."""
+        if int(s.get("ts_daily", 0) or 0) and ctx.counters.get("map_task_share") >= int(s["ts_daily"]):
+            return False
+        ctx.tap_xy(info["share"][0], info["share"][1], spread=2)
+        ctx.sleep(1.0)
+        row = ctx.seen("share_alliance_row", 0.4, ctx.frame())
+        if not row:
+            ctx.log("◎ Compartilhar: linha da aliança não encontrada", "warn")
+            return False
+        ctx.tap_xy(row[0], row[1], spread=2)
+        ctx.sleep(0.8)
+        ok = ctx.seen("share_confirm_btn", 0.4, ctx.frame())
+        if ok:
+            ctx.tap_xy(ok[0], ok[1], spread=2)
+            ctx.sleep(0.8)
+        elif not ctx.tap("btn_confirm", 1.5, after=0.8):
+            return False
+        ctx.counters.add("map_task_share")
+        return True
+
+    def _collect(self, ctx, s, info):
+        """Botão de saque ativo (ladrão + saco) → esquadrão → Marchar."""
+        lim = int(s.get("tc_daily", 0) or 0)
+        if lim and ctx.counters.get("map_task_collect") >= lim:
+            ctx.warn_once("map_collect_lim", f"◎ Coletas de tarefas do dia: {lim}/{lim}")
+            return False
+        ctx.tap_xy(info["plunder"][0], info["plunder"][1], spread=2)
+        ctx.sleep(1.2)
+        if not march(ctx, SQUADS):
+            ctx.press_back()
+            return False
+        ctx.counters.add("map_task_collect")
+        return True
+
+    def _handle_task(self, ctx, s, x, y, ix, iy):
+        """Toca na tarefa (x, y) da tela, decide e age. Devolve True se o mapa pode ter mudado (marchou)."""
+        st = self.store
+        # registro da tarefa (acha a mesma mesmo com 1–2 casas de diferença na leitura): guarda compartilhada/saques
+        rec = st.items[st.add("mission", 0, 0, 1, 0.5, gx=ix, gy=iy)]
+        ctx.tap_xy(int(x), int(y), spread=1)
+        ctx.sleep(1.0)
+        info = self._card(ctx)
+        if not info["open"]:
+            return False
+        tag = f"{info['rar'] or '?'} nv{info['level'] or '?'}" + (" especial" if info["special"] else "") + \
+              (" fantasma" if info["ghost"] else "")
+        marched = False
+        if info["plunder"] and not info["plunder_off"] and self._wants(s, info, "tc") \
+                and rec.get("plunders", 0) < 3 and self._collect(ctx, s, info):
+            rec["plunders"] = rec.get("plunders", 0) + 1
+            ctx.log(f"◎ Tarefa {tag} em X:{ix} Y:{iy} coletada")
+            marched = True
+        elif info["share"] and self._wants(s, info, "ts") and not rec.get("shared"):
+            ready = info["left"] is None or info["left"] <= SHARE_BEFORE_S
+            if ready and self._share(ctx, s, info):
+                rec["shared"] = True
+                ctx.log(f"◎ Tarefa {tag} em X:{ix} Y:{iy} compartilhada com a aliança")
+            elif not ready and "voltar" in s.get("ts_when", ""):
+                at = time.time() + info["left"] - SHARE_BEFORE_S
+                self._enqueue(ix, iy, at)
+                ctx.log(f"◎ Tarefa {tag} em X:{ix} Y:{iy}: compartilho em {(info['left'] - SHARE_BEFORE_S) // 60} min")
+        if not marched and info["plunder_off"] and self._wants(s, info, "tc") and info["left"] \
+                and "voltar" in s.get("ts_when", ""):
+            self._enqueue(ix, iy, time.time() + info["left"] + 5)  # volta para coletar quando terminar
+        self._close_card(ctx)
+        return marched
+
+    def _map_tasks(self, ctx, s, gx, gy, inv, half):
+        """Tarefas secretas visíveis neste pulo (fora da sua aliança): uma por vez, olhando a tela de novo depois
+        de cada ação; se marchou, volta ao ponto antes da próxima."""
+        done = set()
+        for _ in range(8):
+            f = ctx.frame()
+            h, w = f.shape[:2]
+            x0, y0 = self._center(f)
+            d = ctx.dets(f, 0.2)
+            cand = None
+            for cls in MAP_TASK_CLASSES:
+                for (x, y, sc, _, _) in d.get(cls, []):
+                    if sc < 0.4 or not (0.1 * w < x < 0.9 * w and 0.12 * h < y < 0.85 * h):
+                        continue
+                    tx, ty = inv @ np.array([x - x0, y - y0])
+                    ix, iy = int(round(gx + tx)), int(round(gy + ty))
+                    if any(abs(ix - a) <= 2 and abs(iy - b) <= 2 for a, b in done):
+                        continue
+                    cand = (x, y, ix, iy)
+                    break
+                if cand:
+                    break
+            if not cand:
+                return
+            done.add(cand[2:])
+            if self._handle_task(ctx, s, *cand) and not self._goto(ctx, gx, gy):
+                return
+
+    def _run_queue(self, ctx, s, inv, half):
+        """Volta nas tarefas que ficaram para depois (ainda não prontas) e já deram a hora."""
+        due = self._due_queue()
+        if not due:
+            return
+        ctx.log(f"◎ Voltando em {len(due)} tarefa(s) secreta(s) que ficaram para depois")
+        for it in due:
+            self.store.queue.remove(it)
+            if self._goto(ctx, it["gx"], it["gy"]):
+                self._map_tasks(ctx, s, it["gx"], it["gy"], inv, half)
+        self.store.save()
 
     # --- IR -----------------------------------------------------------------
     def go(self, ctx, item, key=None):

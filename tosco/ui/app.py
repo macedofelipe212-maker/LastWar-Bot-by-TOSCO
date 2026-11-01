@@ -622,6 +622,38 @@ class MainWindow(QMainWindow):
         top.lay.addWidget(self.map_info)
         lay.addWidget(top)
 
+        # tarefas secretas no mapa (como os cartões do LWFarmBot): compartilhar / coletar + critérios
+        tasks_row = QHBoxLayout()
+        crit_ts = ["ts_ur", "ts_ssr", "ts_sr", "ts_min_level", "ts_special", "tc_ur", "tc_ssr", "tc_sr",
+                   "tc_min_level", "tc_special", "ts_when", "tc_daily", "ts_daily"]
+        self.map_task_lbl = {}
+        for title, toggles, crit in (("Tarefas secretas", (("ts_share", "Compartilhar"), ("ts_collect", "Coletar")),
+                                      crit_ts),
+                                     ("Missões fantasmas", (("gh_share", "Compartilhar"), ("gh_collect", "Coletar")),
+                                      ["gh_ssr", "ts_when"])):
+            c = Card(title)
+            for key, label in toggles:
+                r = QHBoxLayout()
+                t = Toggle(bool(ms.get(key)))
+                t.toggled.connect(lambda v, key=key: (ms.__setitem__(key, v), self.save_soon()))
+                r.addWidget(t)
+                r.addWidget(QLabel(label))
+                if key == "ts_collect":
+                    self.map_task_lbl[key] = muted("")
+                    r.addWidget(self.map_task_lbl[key])
+                r.addStretch(1)
+                c.lay.addLayout(r)
+            c.lay.addWidget(button("Critérios…", "ghost", lambda _=False, crit=crit, title=title:
+                                   self._map_criteria(title, crit)))
+            tasks_row.addWidget(c)
+        c = Card("Como funciona")
+        c.lay.addWidget(muted("Durante a varredura, cada tarefa secreta FORA da sua aliança é aberta: se o botão de saque "
+                              "estiver ativo e ela passar nos critérios, um esquadrão vai coletar (no máx. 3 por tarefa e o "
+                              "limite do dia); se terminar em 10 min ou menos, compartilha com a aliança. As que ainda não "
+                              "estão prontas podem ficar numa fila para o bot voltar na hora certa."))
+        tasks_row.addWidget(c, 2)
+        lay.addLayout(tasks_row)
+
         filt = QHBoxLayout()
         self.map_chips = {}
         for key, name, icon in CATEGORIES:
@@ -663,7 +695,30 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.map_table, 1)
         return w
 
+    def _map_criteria(self, title, keys):
+        """Janela de critérios das tarefas do mapa, montada a partir dos campos do Scanner."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        ms = self.cfg.task(SCANNER.id, SCANNER.defaults())
+        fields = {f.key: f for f in SCANNER.fields}
+        d = QDialog(self)
+        d.setWindowTitle(f"Critérios — {title}")
+        v = QVBoxLayout(d)
+        f = QFormLayout()
+        for k in keys:
+            f.addRow(muted(fields[k].label), FieldEditor.make(fields[k], ms, self.save_soon))
+        v.addLayout(f)
+        v.addWidget(muted("Sempre: só tarefas fora da sua aliança; compartilha as que terminam em 10 min ou menos "
+                          "(ou já terminaram); coleta só com o botão de saque ativo, até 3 vezes por tarefa."))
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(d.reject)
+        v.addWidget(bb)
+        d.exec()
+
     def _fill_map(self, force=False):
+        if hasattr(self, "map_task_lbl") and "ts_collect" in self.map_task_lbl:
+            ms = self.cfg.task(SCANNER.id, SCANNER.defaults())
+            self.map_task_lbl["ts_collect"].setText(f"{self.engine.counters.get('map_task_collect')}/"
+                                                    f"{ms.get('tc_daily', 5)} hoje")
         st = SCANNER.store
         if not force and st.version == self._map_version:
             return
