@@ -1722,6 +1722,12 @@ class MainWindow(QMainWindow):
         st = self.engine.state()
         col = T.STATE_COLORS[st]
         cur = self.engine.current
+        main = self.cfg.data.get("main_task", "")
+        if self.main_combo.currentData() != main:  # o bot trocou o foco sozinho (ex.: energia dos zumbis acabou)
+            self.main_combo.blockSignals(True)
+            self.main_combo.setCurrentIndex(max(0, self.main_combo.findData(main)))
+            self.main_combo.blockSignals(False)
+            self._mark_main()
         self.pill.setText(f"● {tr('state.' + st)}  ·  {cur[:26]}")
         self.pill.setStyleSheet(f"color:{col};border:1px solid {col};padding:5px 12px;border-radius:3px;"
                                 f"letter-spacing:2px")

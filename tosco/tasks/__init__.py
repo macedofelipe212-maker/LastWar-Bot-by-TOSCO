@@ -1155,82 +1155,268 @@ def heal(ctx):
     return heal_troops(ctx)
 
 
+ENERGY_PERIODS = ["por evento (7 dias)", "por dia", "por sessão"]
+HUNT_FINISH = ["continuar entrando em mobilizações", "voltar para Escavações & Ovos", "parar o bot"]
+ZOMBIE_TYPES = [("tank", "Tanque"), ("air", "Avião"), ("missile", "Míssil")]
+COST_HUNT, COST_RALLY = 10, 20  # energia por zumbi pequeno / por mobilização iniciada
+
+
+def energy_used(ctx, s):
+    """Energia já gasta no período escolhido (QB: 'Energia usada 0/500')."""
+    period = s.get("energy_period", ENERGY_PERIODS[0])
+    if period == "por dia":
+        return ctx.counters.get("hunt_energy")
+    if period == "por sessão":
+        return ctx.e.session.get("hunt_energy", 0)
+    since = s.get("energy_since") or ""
+    try:
+        old = (dt.date.today() - dt.date.fromisoformat(since)).days >= 7
+    except ValueError:
+        old = True
+    if old:  # o evento dura 3 dias e volta a cada 2 semanas: 7 dias sem gastar = começa outro orçamento
+        s["energy_used"], s["energy_since"] = 0, dt.date.today().isoformat()
+    return int(s.get("energy_used", 0) or 0)
+
+
+def spend_energy(ctx, s, n):
+    ctx.counters.add("hunt_energy", n)
+    if not s.get("energy_since"):
+        s["energy_since"] = dt.date.today().isoformat()
+    s["energy_used"] = int(s.get("energy_used", 0) or 0) + n
+
+
 class Hunt(Task):
     id, name, icon, group = "hunt", "Zumbis Dourados & Rally", "☣", "Rallies & Eventos"
-    description = "Gasta stamina em zumbis/Elites da Perdição pela busca do mapa: ataque solo ou inicia rally, " \
-                  "e pode subir de nível sozinho."
+    description = "Caça zumbis e inicia mobilizações de chefes com a energia que você reservar; entre uma marcha e " \
+                  "outra entra em mobilizações e passa nas escavações."
     max_minutes = 30
     default_interval = 5.0
     templates = [("search_zombie", "Aba Zumbi na busca"), ("search_doom", "Aba Elite da Perdição na busca"),
                  ("search_gold_zombie", "Aba Zumbi Dourado na busca"),
                  ("btn_level_minus", "Botão - do nível"), ("btn_level_plus", "Botão + do nível"),
-                 ("btn_rally_confirm", "Confirmar duração do rally"), ("no_stamina", "Aviso de sem stamina")]
-    fields = [Field("mode", "Alvo", "choice", "zombie", options=["zombie", "gold_zombie", "doom"]),
-              Field("level", "Nível do alvo", "int", 1, minimum=1, maximum=60),
-              Field("climb", "Subir 1 nível a cada vitória", "bool", False),
-              Field("max_level", "Nível máximo ao subir", "int", 30, minimum=1, maximum=60),
-              Field("rally", "Iniciar rally (em vez de ataque solo)", "bool", False),
-              Field("max_attacks", "Ataques por execução", "int", 3, minimum=1, maximum=50),
-              Field("daily_limit", "Limite diário (0 = ∞)", "int", 0, minimum=0, maximum=999),
-              Field("squad_order", "Ordem de esquadrões", "text", "1,2,3,4"),
-              Field("heal", "Curar depois", "bool", True)]
+                 ("btn_rally_confirm", "Confirmar duração do rally"), ("no_stamina", "Aviso de sem stamina"),
+                 ("btn_event_rewards", "Botão de coletar recompensas do evento Zumbis Dourados")] + \
+                [(f"zombie_type_{k}", f"Filtro de tipo de zumbi na busca: {n}") for k, n in ZOMBIE_TYPES]
+    fields = [
+        Field("mode", "Alvo", "choice", "gold_zombie", options=["zombie", "gold_zombie", "doom"]),
+        Field("hunt_on", "Caçar zumbis pequenos (10 de energia cada)", "bool", True),
+        Field("level", "Nível do zumbi", "int", 1, minimum=1, maximum=100),
+        Field("climb", "Subir 1 nível a cada vitória", "bool", False),
+        Field("max_level", "Nível máximo ao subir", "int", 30, minimum=1, maximum=100),
+    ] + [Field(f"hunt_sq{n}", f"Esquadrão {n} caça", "bool", n == "1") for n in SQUADS] + [
+        Field("keep_hunting", "Continuar caçando (sem esperar voltar à base)", "bool", True),
+    ] + [Field(f"ztype_{k}", f"Tipo {n}", "bool", k == "tank") for k, n in ZOMBIE_TYPES] + [
+        Field("rally", "Iniciar mobilizações de chefes (20 de energia cada)", "bool", False),
+    ] + [f for n in SQUADS for f in (
+        Field(f"rally_sq{n}", f"Esquadrão {n} inicia", "bool", False),
+        Field(f"rally_sq{n}_min", f"Esquadrão {n}: nível do chefe de", "int", 1, minimum=1, maximum=100),
+        Field(f"rally_sq{n}_max", f"…até", "int", 100, minimum=1, maximum=100))] + [
+        Field("rally_high_first", "Chefes de nível mais alto primeiro", "bool", True),
+        Field("join", "Entrar também nas mobilizações (usa Auto-Entrar em Rallies)", "bool", True),
+        Field("energy_budget", "Gastar no máximo (energia; 0 = sem limite)", "int", 500, minimum=0, maximum=100000),
+        Field("energy_period", "Com que frequência", "choice", ENERGY_PERIODS[0], options=ENERGY_PERIODS),
+        Field("energy_used", "Energia já usada neste período (ponha 0 para zerar)", "int", 0, minimum=0,
+              maximum=100000),
+        Field("free_energy", "Usar energia grátis quando acabar", "bool", True),
+        Field("use_scrolls", "Usar pergaminhos de energia do inventário", "bool", True),
+        Field("max_attacks", "Marchas por rodada", "int", 6, minimum=1, maximum=50),
+        Field("daily_limit", "Limite diário de caçadas (0 = ∞)", "int", 0, minimum=0, maximum=999),
+        Field("check_digs", "Verificar escavações entre as marchas", "bool", True),
+        Field("heal", "Curar tropas", "bool", True),
+        Field("heal_batch_min", "Curar em lotes de — mínimo (0 = tudo)", "int", 0, minimum=0, maximum=100000),
+        Field("heal_batch_max", "…máximo", "int", 0, minimum=0, maximum=100000),
+        Field("collect_rewards", "Coletar as recompensas do evento no final", "bool", True),
+        Field("on_finish", "Quando a energia acabar", "choice", HUNT_FINISH[0], options=HUNT_FINISH),
+        Field("squad_order", "Ordem de esquadrões (versões antigas)", "text", "1,2,3,4"),
+    ]
     main_capable = True
     cards = [
         ("O que fazer", [
-            Card("Alvo", "☣", "Zumbi comum, Zumbi Dourado ou Elite da Perdição, e o nível.",
-                 fields=["mode", "level", "climb", "max_level"],
-                 summary=lambda s: f"{ {'zombie': 'zumbi', 'gold_zombie': 'zumbi dourado', 'doom': 'elite'}.get(s['mode'], s['mode'])}"
-                                   f" nv {s['level']}" + (" · sobe de nível" if s["climb"] else "")),
-            Card("Iniciar rally", "⚑", "Lidera um rally em vez de atacar sozinho.", toggle="rally",
-                 summary=lambda s: "inicia rally" if s["rally"] else "ataque solo"),
+            Card("Caçar zumbis pequenos", "☣", "10 de energia cada. Esquadrões que caçam, nível e se continua caçando "
+                 "sem esperar o esquadrão voltar.", toggle="hunt_on",
+                 fields=["mode", "level", "climb", "max_level"] + [f"hunt_sq{n}" for n in SQUADS] + ["keep_hunting"],
+                 summary=lambda s: "esquadrões " + (",".join(n for n in SQUADS if s.get(f"hunt_sq{n}")) or "nenhum")
+                 + f" · nv {s['level']}" + (" · sobe" if s["climb"] else "")),
+            Card("Tipo de zumbi", "◈", "Filtra o tipo na busca (precisa das imagens 'zombie_type_…' no Estúdio).",
+                 fields=[f"ztype_{k}" for k, _ in ZOMBIE_TYPES],
+                 summary=lambda s: ", ".join(n for k, n in ZOMBIE_TYPES if s.get(f"ztype_{k}")) or "qualquer"),
+            Card("Iniciar mobilizações", "⚑", "20 de energia cada. Cada esquadrão líder com sua faixa de nível do "
+                 "chefe; começa pelos de nível mais alto.", toggle="rally",
+                 fields=[k for n in SQUADS for k in (f"rally_sq{n}", f"rally_sq{n}_min", f"rally_sq{n}_max")]
+                 + ["rally_high_first"],
+                 summary=lambda s: "líderes " + (",".join(n for n in SQUADS if s.get(f"rally_sq{n}")) or "nenhum")),
+            Card("Entrar em mobilizações", "⚔", "Grátis. Usa as regras da página Auto-Entrar em Rallies (esquadrões, "
+                 "níveis, posição, listas).", toggle="join"),
         ]),
-        ("Energia e limites", [
-            Card("Ataques", "⚔", "Quantos ataques por rodada e por dia.", fields=["max_attacks", "daily_limit"],
+        ("Energia", [
+            Card("Energia a usar", "⚡", "UM orçamento para caçada + mobilizações iniciadas. Parar/Iniciar continuam "
+                 "de onde parou; ponha 0 em 'já usada' para zerar.",
+                 fields=["energy_budget", "energy_period", "energy_used"],
+                 summary=lambda s: (f"{s['energy_used']}/{s['energy_budget']} · {s['energy_period']}"
+                                    if int(s["energy_budget"]) else "sem limite")),
+            Card("Recarregar energia", "↺", "Quando acabar: primeiro a energia grátis, depois os pergaminhos do "
+                 "inventário. Nunca compra com diamantes.", fields=["free_energy", "use_scrolls"],
+                 summary=lambda s: " + ".join(x for x, on in (("grátis", s["free_energy"]),
+                                                              ("pergaminhos", s["use_scrolls"])) if on) or "não recarrega"),
+            Card("Limites", "⏳", "Marchas por rodada e caçadas por dia.", fields=["max_attacks", "daily_limit"],
                  summary=lambda s: f"{s['max_attacks']} por rodada · " +
                                    (f"{s['daily_limit']}/dia" if int(s["daily_limit"]) else "sem limite diário")),
-            Card("Esquadrões", "⚑", "Ordem de preferência dos esquadrões.", fields=["squad_order"],
-                 summary="ordem {squad_order}"),
-            Card("Curar tropas", "✚", "Cura os feridos depois de cada rodada.", toggle="heal"),
+        ]),
+        ("Durante a sessão", [
+            Card("Verificar escavações", "⛏", "Entre as marchas dá uma passada no chat da aliança (escavações, ovos, "
+                 "presentes).", toggle="check_digs"),
+            Card("Curar tropas", "✚", "Cura pedindo ajuda da aliança, em lotes se quiser.", toggle="heal",
+                 fields=["heal_batch_min", "heal_batch_max"],
+                 summary=lambda s: ("lotes " + f"{s['heal_batch_min']}–{s['heal_batch_max']}"
+                                    if int(s["heal_batch_min"]) else "tudo de uma vez") if s["heal"] else "não cura"),
+            Card("Ao terminar", "⚑", "Quando a energia acaba: coleta as recompensas, cura e depois…",
+                 fields=["collect_rewards", "on_finish"], summary="{on_finish}"),
         ]),
     ]
 
+    def _search(self, ctx, s, level):
+        """Busca do mapa no alvo e nível pedidos; deixa o alvo aberto no centro. False = não deu."""
+        ctx.to_world()
+        if not (ctx.tap("btn_search", 2) and ctx.tap(f"search_{s['mode']}", 2)):
+            return False
+        for k, _ in ZOMBIE_TYPES:
+            if s.get(f"ztype_{k}") and ctx.vision.has(f"zombie_type_{k}"):
+                ctx.tap(f"zombie_type_{k}", 1.0, after=0.3)
+        for _ in range(100):
+            if not ctx.tap("btn_level_minus", 0.3, after=0.05):
+                break
+        for _ in range(int(level) - 1):
+            ctx.tap("btn_level_plus", 0.5, after=0.08)
+        if not ctx.tap("btn_go", 2, after=2.0):
+            return False
+        ctx.tap_rel(0.5, 0.5)
+        ctx.sleep(0.8)
+        return True
+
+    def _no_energy(self, ctx, s):
+        """Aviso de sem energia: recarrega (grátis → pergaminhos) se permitido. True = continua sem energia."""
+        f = ctx.frame()
+        empty = (ctx.vision.has("no_stamina") and ctx.exists("no_stamina", 0.85)) or ctx.seen("stamina_out", 0.5, f)
+        if not empty:
+            return False
+        if s.get("free_energy") and ctx.ai("btn_stamina_use", f):
+            hit = ctx.seen("stamina_use_free", 0.5, f)
+            if hit:
+                ctx.tap_xy(hit[0], hit[1], spread=2)
+                ctx.sleep(0.8)
+                ctx.log("☣ Energia grátis usada")
+                return False
+        if s.get("use_scrolls"):
+            hit = ctx.seen("stamina_use_btn", 0.5, f)
+            if hit:
+                ctx.tap_xy(hit[0], hit[1], spread=2)
+                ctx.sleep(0.8)
+                ctx.log("☣ Pergaminho de energia usado")
+                return False
+        ctx.log("☣ Sem energia", "warn")
+        ctx.go_home()
+        return True
+
+    def _actions(self, s):
+        """O que tentar nesta marcha, em ordem: mobilizações primeiro (rendem mais), depois caçada."""
+        out = []
+        if s.get("rally"):
+            leaders = [n for n in SQUADS if s.get(f"rally_sq{n}")] or ["1"]
+            hi = s.get("rally_high_first", True)
+            seen = set()
+            for q in sorted(leaders, key=lambda q: -int(s.get(f"rally_sq{q}_max", 100)) if hi else 0):
+                lvl = int(s.get(f"rally_sq{q}_max" if hi else f"rally_sq{q}_min", 1) or 1)
+                if lvl in seen:
+                    continue
+                seen.add(lvl)  # um líder ocupado → tenta o próximo líder (outro nível) antes da caçada
+                fits = [n for n in leaders if int(s.get(f"rally_sq{n}_min", 1)) <= lvl <= int(s.get(f"rally_sq{n}_max", 100))]
+                out.append(("rally", lvl, fits or [q], COST_RALLY))
+        if s.get("hunt_on", True):
+            hunters = [n for n in SQUADS if s.get(f"hunt_sq{n}")] or parse_list(s.get("squad_order")) or SQUADS
+            out.append(("hunt", int(s["level"]), hunters, COST_HUNT))
+        return out
+
     def run(self, ctx, s):
-        squads = parse_list(s["squad_order"]) or SQUADS
+        budget = int(s.get("energy_budget", 0) or 0)
+        joiner = ctx.e.task_by_id("auto_join")
+        marched = 0
+        finished = False
         for _ in range(int(s["max_attacks"])):
             if int(s["daily_limit"]) and ctx.counters.get("hunts") >= int(s["daily_limit"]):
                 ctx.log("☣ Limite diário de caçadas atingido")
+                finished = True
                 break
-            ctx.to_world()
-            if not (ctx.tap("btn_search", 2) and ctx.tap(f"search_{s['mode']}", 2)):
+            used = energy_used(ctx, s)
+            acts = [a for a in self._actions(s) if not budget or used + a[3] <= budget]
+            if not acts:
+                ctx.log(f"☣ Orçamento de energia gasto ({used}/{budget})")
+                finished = True
                 break
-            for _ in range(60):
-                if not ctx.tap("btn_level_minus", 0.3, after=0.05):
+            done = False
+            for kind, lvl, squads, cost in acts:
+                if not self._search(ctx, s, lvl):
+                    continue
+                if kind == "rally":
+                    if not ctx.tap("btn_rally", 2):
+                        ctx.go_home()
+                        continue
+                    ctx.tap("btn_rally_confirm", 1.5)
+                elif not ctx.tap("btn_attack", 2):
+                    ctx.go_home()
+                    continue
+                if self._no_energy(ctx, s):
+                    finished = True
                     break
-            for _ in range(int(s["level"]) - 1):
-                ctx.tap("btn_level_plus", 0.5, after=0.08)
-            if not ctx.tap("btn_go", 2, after=2.0):
+                sq = march(ctx, squads)
+                if not sq:
+                    ctx.back()
+                    ctx.go_home()
+                    continue  # nenhum esquadrão desta função livre: tenta a outra ação
+                spend_energy(ctx, s, cost)
+                marched += 1
+                done = True
+                if kind == "hunt":
+                    ctx.counters.add("hunts")
+                    if s["climb"] and int(s["level"]) < int(s["max_level"]):
+                        s["level"] = int(s["level"]) + 1
+                        ctx.log(f"☣ Próximo alvo: nível {s['level']}")
+                    ctx.log(f"☣ Caçando zumbi Nv.{lvl} (esq. {sq}) — energia {energy_used(ctx, s)}"
+                            + (f"/{budget}" if budget else ""))
+                else:
+                    ctx.counters.add("hunt_rallies")
+                    ctx.log(f"⚑ Mobilização iniciada Nv.{lvl} (esq. {sq})")
+                ctx.sleep(1.2)
                 break
-            ctx.tap_rel(0.5, 0.5)
-            ctx.sleep(0.8)
-            if s["rally"]:
-                if not ctx.tap("btn_rally", 2):
-                    break
-                ctx.tap("btn_rally_confirm", 1.5)
-            elif not ctx.tap("btn_attack", 2):
+            if finished or not done:
                 break
-            if ctx.vision.has("no_stamina") and ctx.exists("no_stamina", 0.85):
-                ctx.log("☣ Sem stamina", "warn")
+            if s.get("join") and joiner:
+                joiner.run(ctx, ctx.e.cfg.task(joiner.id, joiner.defaults()))
+            elif s.get("check_digs", True):
+                check_digs(ctx)
+            if not s.get("keep_hunting", True):
                 break
-            if not march(ctx, squads):
-                break
-            ctx.counters.add("hunts")
-            if s["climb"] and int(s["level"]) < int(s["max_level"]):
-                s["level"] = int(s["level"]) + 1
-                ctx.log(f"☣ Próximo alvo: nível {s['level']}")
-            ctx.sleep(1.5)
-        if s["heal"]:
-            heal(ctx)
+        if not marched and s.get("join") and joiner and not finished:
+            joiner.run(ctx, ctx.e.cfg.task(joiner.id, joiner.defaults()))  # sem energia/alvo: ao menos entra
+        if s["heal"] and (marched or finished):
+            heal_troops(ctx, s.get("heal_batch_min", 0), s.get("heal_batch_max", 0))
+        if finished:
+            self._finish(ctx, s)
         ctx.go_home()
+
+    def _finish(self, ctx, s):
+        if s.get("collect_rewards") and ctx.vision.has("btn_event_rewards"):
+            if ctx.tap("btn_event_rewards", 2, after=1.0):
+                ctx.tap("btn_claim_all", 1.5) or ctx.tap("btn_claim", 1.5)
+                ctx.log("☣ Recompensas do evento coletadas")
+            ctx.go_home()
+        what = s.get("on_finish", HUNT_FINISH[0])
+        if what == HUNT_FINISH[1] and ctx.e.cfg.data.get("main_task") == self.id:
+            ctx.e.cfg.data["main_task"] = "auto_digs"
+            ctx.log("☣ Energia acabou — o foco do bot volta para Escavações & Ovos")
+            ctx.e._emit()
+        elif what == HUNT_FINISH[2]:
+            ctx.log("☣ Energia acabou — parando o bot")
+            ctx.e.stop()
 
 
 class MarshalGuard(Task):
