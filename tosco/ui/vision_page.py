@@ -1,9 +1,12 @@
 """Estúdio visual (IA): o que a IA do TOSCO reconhece no jogo, com miniatura e nome em português de cada coisa,
 agrupado por assunto, e a confiança de cada uma num controle deslizante (como o painel do LWFarmBot).
 O botão "O QUE A IA VÊ AGORA" tira um print do jogo e marca, em cada cartão e na imagem, o que foi achado."""
+import threading
+import time
+
 import cv2
 import numpy as np
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget)
@@ -36,6 +39,32 @@ SLIDER_HELP = ("Confiança: o quanto a IA precisa ter certeza antes do bot usar 
                "← Menor: aceita mesmo em dúvida. Use se o bot NÃO acha isto na tela (cartão laranja, 'fraco').\n"
                "→ Maior: só aceita com muita certeza. Use se o bot clica no lugar ERRADO.\n"
                "Não mexe na foto — a foto é só exemplo de como isto aparece no jogo.")
+
+
+def annotate(img, det, cfg):
+    """Print do jogo com caixa + nome em português de tudo que a IA achou: verde = o bot usa, laranja = fraco."""
+    pix = bgr_to_pixmap(img)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    f = QFont(T.FONT.split(",")[0])
+    f.setPixelSize(max(11, img.shape[0] // 60))
+    f.setBold(True)
+    p.setFont(f)
+    for cls, ds in det.items():
+        thr = catalog.threshold(cls, cfg, catalog.FIXED.get(cls))
+        for x, y, sc, bw, bh in ds:
+            col = QColor(T.LIME if sc >= thr else T.AMBER)
+            p.setPen(QPen(col, max(2, img.shape[0] // 400)))
+            r = QRectF(x - bw / 2, y - bh / 2, bw, bh)
+            p.drawRect(r)
+            text = f"{catalog.label(cls)} {sc:.2f}"
+            tw = p.fontMetrics().horizontalAdvance(text) + 6
+            th = p.fontMetrics().height()
+            bg = QRectF(max(0, min(r.left(), img.shape[1] - tw)), max(0, r.top() - th), tw, th)  # não corta na borda
+            p.fillRect(bg, QColor(0, 0, 0, 170))
+            p.drawText(bg.adjusted(3, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
+    p.end()
+    return pix
 
 
 class ClickLabel(QLabel):
@@ -483,29 +512,7 @@ class VisionPage(QWidget):
         return c.copy() if c.size else None
 
     def _draw(self):
-        img, det = self._last_img, self._last_det
-        pix = bgr_to_pixmap(img)
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.Antialiasing)
-        f = QFont(T.FONT.split(",")[0])
-        f.setPixelSize(max(11, img.shape[0] // 60))
-        f.setBold(True)
-        p.setFont(f)
-        for cls, ds in det.items():
-            thr = catalog.threshold(cls, self.cfg, catalog.FIXED.get(cls))
-            for x, y, sc, bw, bh in ds:
-                col = QColor(T.LIME if sc >= thr else T.AMBER)
-                p.setPen(QPen(col, max(2, img.shape[0] // 400)))
-                r = QRectF(x - bw / 2, y - bh / 2, bw, bh)
-                p.drawRect(r)
-                text = f"{catalog.label(cls)} {sc:.2f}"
-                tw = p.fontMetrics().horizontalAdvance(text) + 6
-                th = p.fontMetrics().height()
-                bg = QRectF(max(0, min(r.left(), img.shape[1] - tw)), max(0, r.top() - th), tw, th)  # não corta na borda
-                p.fillRect(bg, QColor(0, 0, 0, 170))
-                p.drawText(bg.adjusted(3, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
-        p.end()
-        self._pix = pix
+        self._pix = annotate(self._last_img, self._last_det, self.cfg)
         self._fit()
 
     def _zoom_preview(self):
@@ -523,6 +530,107 @@ class VisionPage(QWidget):
     def _fit(self):
         if getattr(self, "_pix", None) is not None:
             self.preview.setPixmap(self._pix.scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+
+class LiveVision(QWidget):
+    """Janela que fica ao lado do jogo e mostra, a cada segundo, o que a IA está vendo. Com o bot rodando usa
+    o mesmo print que o bot acabou de olhar (não tira outro); parado, tira um print sozinho. Só olha, nunca clica."""
+    got = Signal(object, object, float, str)
+
+    def __init__(self, win, on_close=None):
+        super().__init__(None, Qt.Window | Qt.WindowStaysOnTopHint)
+        self.win, self.engine, self.on_close = win, win.engine, on_close
+        self.setWindowTitle("TOSCO · o que a IA vê (ao vivo)")
+        self.setStyleSheet(win.styleSheet())
+        scr = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(760, scr.width() // 2), min(520, scr.height() // 2))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        self.status = QLabel("Olhando o jogo…")
+        self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        self.view = QLabel()
+        self.view.setAlignment(Qt.AlignCenter)
+        self.view.setMinimumSize(240, 140)
+        self.view.setStyleSheet("background:#000; border-radius:6px")
+        lay.addWidget(self.view, 1)
+        self.found = _muted("")
+        self.found.setWordWrap(True)
+        lay.addWidget(self.found)
+        lay.addWidget(_muted("Verde = o bot usa · Laranja = viu, mas achou fraco (não usa) · "
+                             "Só olha: não clica nem mexe no jogo."))
+        self._pix, self._busy, self._seen_t = None, False, 0.0
+        self.got.connect(self._show)
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._tick)
+
+    @property
+    def cfg(self):
+        return self.win.cfg.data  # lido sempre: trocar de perfil troca o dicionário
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.timer.start()
+        self._tick()
+
+    def closeEvent(self, e):
+        self.timer.stop()
+        if self.on_close:
+            self.on_close()
+        super().closeEvent(e)
+
+    def _tick(self):
+        if self._busy:
+            return
+        e = self.engine
+        bot = e.running and not e.paused and time.time() - e.last_frame_t < 5
+        if bot and e.last_frame_t == self._seen_t:
+            return  # o bot ainda não olhou de novo
+        self._busy = True
+        threading.Thread(target=self._work, args=(bot,), daemon=True).start()
+
+    def _work(self, bot):
+        e, t = self.engine, 0.0
+        try:
+            if bot:
+                img, t = e.last_frame, e.last_frame_t
+            else:
+                img = e.backend.capture()  # direto: não suja o log do bot com "captura falhou"
+            if img is None:
+                self.got.emit(None, None, t, "Não consegui ver o jogo (fechado ou minimizado?)")
+                return
+            det = e.yolo.detect(img, self.cfg.get("ai_model", "preciso"), conf=SEEN_MIN)
+            self.got.emit(img, det, t, "")
+        except Exception as ex:
+            self.got.emit(None, None, t, f"Erro: {ex}")
+
+    def _show(self, img, det, t, err):
+        self._busy = False
+        self._seen_t = t or self._seen_t
+        e = self.engine
+        who = (f"Bot {e.state()} · fazendo: {e.current} · print do bot" if t else
+               f"Bot {e.state()} · print tirado por esta janela")
+        if err:
+            self.status.setText(f"{who}\n⚠ {err}")
+            return
+        used, weak = [], []
+        for cls, ds in det.items():
+            thr = catalog.threshold(cls, self.cfg, catalog.FIXED.get(cls))
+            (used if ds[0][2] >= thr else weak).append(catalog.label(cls) + (f" ×{len(ds)}" if len(ds) > 1 else ""))
+        self.status.setText(f"{who} · {time.strftime('%H:%M:%S')} · IA {e.yolo.last_ms:.0f} ms")
+        self.found.setText((f"✔ Usa: {', '.join(sorted(used))}" if used else "✔ Nada que o bot use agora") +
+                           (f"\n◌ Fraco: {', '.join(sorted(weak))}" if weak else ""))
+        self._pix = annotate(img, det, self.cfg)
+        self._fit()
+
+    def _fit(self):
+        if self._pix is not None:
+            self.view.setPixmap(self._pix.scaled(self.view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)

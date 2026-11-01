@@ -706,6 +706,7 @@ class Engine:
         self.thread = None
         self.current = "—"
         self.last_frame = None
+        self.last_frame_t = 0.0  # quando o bot tirou o último print (a janela "o que a IA vê" reaproveita)
         self.last_run = {}
         self.queue = []          # módulos pedidos com "executar agora"
         self.only = None         # se definido, roda só estes módulos (agenda / scanner)
@@ -759,7 +760,7 @@ class Engine:
             self.log(f"captura falhou: {ex}", "warn")
             img = None
         if img is not None:
-            self.last_frame = img
+            self.last_frame, self.last_frame_t = img, time.time()
         return img
 
     # --- comandos -------------------------------------------------------

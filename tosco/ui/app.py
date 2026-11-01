@@ -25,7 +25,7 @@ from ..tasks import ALL_TASKS, all_templates
 from . import theme as T
 from .i18n import LANGS, set_lang, tr
 from .cards import TaskPage
-from .vision_page import VisionPage
+from .vision_page import LiveVision, VisionPage
 from .widgets import Card, CaptureCanvas, GridBackground, Radar, StatCard, Toggle, bgr_to_pixmap, make_icon
 
 LEVEL_COLORS = {"info": T.TEXT, "warn": T.AMBER, "error": T.RED}
@@ -358,6 +358,16 @@ class MainWindow(QMainWindow):
         self.b_userpause.toggled.connect(self._toggle_userpause)
         self._toggle_userpause(self.b_userpause.isChecked(), log=False)
         lay.addWidget(self.b_userpause)
+        # liga/desliga uma janelinha que mostra ao vivo o que a IA está vendo
+        self.live = None
+        self.b_live = QPushButton("👁 Ver o que a IA vê: DESLIGADO")
+        self.b_live.setObjectName("chip")
+        self.b_live.setCheckable(True)
+        self.b_live.setToolTip("Abre uma janela por cima de tudo que se atualiza sozinha a cada segundo com o que a\n"
+                               "IA reconhece no jogo (com o bot rodando, é o mesmo print que o bot acabou de olhar).\n"
+                               "Só olha: não clica nem mexe no jogo. Clique de novo (ou feche a janela) para desligar.")
+        self.b_live.toggled.connect(self._toggle_live)
+        lay.addWidget(self.b_live)
         lay.addStretch(1)
         self.pill = QLabel()
         self.pill.setFixedHeight(30)
@@ -374,6 +384,17 @@ class MainWindow(QMainWindow):
         if log:
             self.save_soon()
             self.engine.log("✋ Pausa quando você mexe: " + ("ligada" if on else "DESLIGADA — o bot não espera você"))
+
+    def _toggle_live(self, on):
+        self.b_live.setText("👁 Ver o que a IA vê: LIGADO" if on else "👁 Ver o que a IA vê: DESLIGADO")
+        if on and self.live is None:
+            self.live = LiveVision(self, on_close=lambda: self.b_live.setChecked(False))
+            self.live.show()
+        elif not on and self.live is not None:
+            live, self.live = self.live, None
+            live.on_close = None
+            live.close()
+            live.deleteLater()
 
     def _set_main(self, _=None):
         self.cfg.data["main_task"] = self.main_combo.currentData()
@@ -1700,6 +1721,7 @@ class MainWindow(QMainWindow):
             if QMessageBox.question(self, APP, "O motor está rodando. Fechar mesmo assim?") != QMessageBox.Yes:
                 ev.ignore()
                 return
+        self.b_live.setChecked(False)
         self.engine.stop()
         self.clicker.stop()
         self.engine.telegram.stop_polling()
