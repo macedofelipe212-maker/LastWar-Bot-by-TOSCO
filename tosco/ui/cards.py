@@ -197,7 +197,14 @@ class TaskPage(QWidget):
         lv.addWidget(sub)
         self.banner = QLabel()
         self.banner.setWordWrap(True)
-        lv.addWidget(self.banner)
+        self.b_focus = QPushButton()  # só nas tarefas que podem ser o foco do bot
+        self.b_focus.setObjectName("chip")
+        self.b_focus.clicked.connect(self._toggle_focus)
+        bl = QHBoxLayout()
+        bl.setSpacing(8)
+        bl.addWidget(self.banner, 1)
+        bl.addWidget(self.b_focus)
+        lv.addLayout(bl)
         self.single = tasks[0] if len(tasks) == 1 else None
         if self.single:
             self._task_sections(lv, self.single)
@@ -255,7 +262,7 @@ class TaskPage(QWidget):
                 self._add(flow, c, ICON_TINTS[(i * 3 + j) % len(ICON_TINTS)], task, s)
         flow = self._section(lv, "Quando roda e o que reconhece")
         if task.main_capable:
-            self._add(flow, Card("Dias e horário", "◷", "Janela em que a tarefa principal trabalha.",
+            self._add(flow, Card("Dias e horário", "◷", "Janela em que o foco do bot trabalha.",
                                  fields=["days", "hours"], summary=lambda s: s.get("hours", "")), T.CYAN, task, s)
         self._add(flow, Card("Imagens do jogo", "▣", "O que este módulo precisa reconhecer na tela.",
                              fields=["__images__"], summary=lambda _s: self._image_summary(task)),
@@ -372,20 +379,28 @@ class TaskPage(QWidget):
             t.refresh()
         self.refresh_banner()
 
+    def _toggle_focus(self):
+        main = self.win.cfg.data.get("main_task")
+        self.win.set_main("" if main == self.single.id else self.single.id)
+
     def refresh_banner(self):
+        self.b_focus.hide()
         if not self.single:
             self.banner.hide()
             return
         task = self.single
         main = self.win.cfg.data.get("main_task")
         if task.main_capable:
+            self.b_focus.show()
             if main == task.id:
-                txt, col = "★ TAREFA PRINCIPAL — roda sem parar enquanto o bot está ligado.", T.LIME
+                txt, col = "🎯 FOCO DO BOT — roda sem parar enquanto o bot está ligado; as outras entram nos intervalos.", T.LIME
+                self.b_focus.setText("✕ Tirar do foco")
             else:
-                txt, col = "Esta pode ser a tarefa principal: escolha no topo, em 'Tarefa principal'.", T.MUTED
+                txt, col = "Esta pode ser o foco do bot (a tarefa que ele faz sem parar).", T.MUTED
+                self.b_focus.setText("🎯 Tornar o foco do bot")
         else:
             on = self.s.get("enabled")
-            txt, col = ("● LIGADO — roda nos intervalos, entre as rodadas da tarefa principal." if on else
+            txt, col = ("● LIGADO — roda nos intervalos, entre as rodadas do foco do bot." if on else
                         "○ DESLIGADO — ligue no cartão abaixo ou na chave do topo desta página."), \
                 (T.LIME if on else T.MUTED)
         self.banner.setText(txt)

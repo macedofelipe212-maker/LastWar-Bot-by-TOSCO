@@ -122,7 +122,7 @@ NAV = [
         ("t:auto_join", "⚔", "Mobilizações Automáticas", "Entra nos rallies dos chefes que você escolher."),
     ]),
     ("TAREFAS EXTRAS (ÀS VEZES)", [
-        ("daily", "✉", "Tarefas Diárias", "Pequenas tarefas que entram entre as rodadas da tarefa principal."),
+        ("daily", "✉", "Tarefas Diárias", "Pequenas tarefas que entram entre as rodadas do foco do bot."),
         ("t:arms_race", "🏁", "Corrida Armamentista", "Ganha pontos da Corrida com o que você permitir."),
         ("t:marshal_guard", "♜", "Guarda do Marechal", "Inicia e entra nos rallies do evento do Marechal."),
         ("t:first_lady", "♛", "Primeira-Dama", "Aprova pedidos de cargos do capitólio."),
@@ -335,17 +335,21 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(16, 0, 16, 0)
         lay.setSpacing(8)
-        self.b_start = button(tr("btn.start") + " (Alt+S)", "go", self.engine.start)
-        lay.addWidget(self.b_start)
+        # foco = a tarefa que roda sem parar; fica antes do INICIAR porque é escolhida antes de ligar
         self.main_combo = QComboBox()
-        self.main_combo.addItem("Tarefa principal: nenhuma (só extras)", "")
+        self.main_combo.addItem("🎯 Foco: nenhum (só extras)", "")
         for t in ALL_TASKS:
             if t.main_capable:
-                self.main_combo.addItem(f"Tarefa principal: {t.name}", t.id)
+                self.main_combo.addItem(f"🎯 Foco: {t.name}", t.id)
         self.main_combo.setCurrentIndex(max(0, self.main_combo.findData(self.cfg.data.get("main_task", ""))))
         self.main_combo.currentIndexChanged.connect(self._set_main)
-        self.main_combo.setMinimumWidth(270)
+        self.main_combo.setMinimumWidth(250)
+        self.main_combo.setToolTip("Foco do bot: a tarefa que ele faz SEM PARAR enquanto está ligado.\n"
+                                   "As outras tarefas ligadas são extras: entram só nos intervalos de cada uma\n"
+                                   "e depois o bot volta para o foco. 'Nenhum' = só as extras, nos intervalos.")
         lay.addWidget(self.main_combo)
+        self.b_start = button(tr("btn.start") + " (Alt+S)", "go", self.engine.start)
+        lay.addWidget(self.b_start)
         self.b_pause = button(tr("btn.pause") + " (Alt+P)", "warn", self._pause_resume)
         self.b_stop = button(tr("btn.stop"), "danger", self.engine.stop)
         lay.addWidget(self.b_pause)
@@ -396,11 +400,15 @@ class MainWindow(QMainWindow):
             live.close()
             live.deleteLater()
 
+    def set_main(self, task_id):
+        """Escolhe o foco do bot (também usado pelo botão '★ Tornar o foco' na página da tarefa)."""
+        self.main_combo.setCurrentIndex(max(0, self.main_combo.findData(task_id or "")))
+
     def _set_main(self, _=None):
         self.cfg.data["main_task"] = self.main_combo.currentData()
         self.save_soon()
         self._mark_main()
-        self.engine.log(f"★ Tarefa principal: {self.main_combo.currentText().split(': ', 1)[1]}")
+        self.engine.log(f"🎯 Foco do bot: {self.main_combo.currentText().split(': ', 1)[1]}")
 
     def _mark_main(self):
         main = self.cfg.data.get("main_task")
