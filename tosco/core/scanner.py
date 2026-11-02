@@ -74,13 +74,20 @@ class ScanStore:
             os.replace(tmp, self.path)
             self.version += 1
 
-    def begin_scan(self):
-        with self._lock:  # mantém fixados e favoritados no jogo; o resto é refeito
-            # mantém fixados, favoritados e tarefas já compartilhadas/coletadas (não repete)
-            self.items = {k: v for k, v in self.items.items()
-                          if k in self.pinned or v.get("fav") or v.get("shared") or v.get("plunders")}
+    # Lista ACUMULATIVA (como nos outros bots): cada varredura soma e atualiza o "visto"; some só o que não é
+    # visto há muito tempo (caminhão anda: some antes). Fixados, favoritados e tarefas já tratadas ficam.
+    STALE_S = {"truck": 45 * 60}
+    STALE_DEFAULT_S = 6 * 3600
 
-    def add(self, cat, px, py, frame_w, score, label="", gx=None, gy=None, origin=None):
+    def begin_scan(self):
+        with self._lock:
+            now = time.time()
+            self.items = {k: v for k, v in self.items.items()
+                          if k in self.pinned or v.get("fav") or v.get("shared") or v.get("plunders")
+                          or now - v.get("seen", 0) < self.STALE_S.get(v.get("cat"), self.STALE_DEFAULT_S)}
+            self.version += 1
+
+    def add(self, cat, px, py, frame_w, score, label="", gx=None, gy=None, origin=None, **extra):
         """gx, gy: casa real do mapa (varredura por coordenadas; distância em casas a partir de origin).
         Sem elas: px, py = posição na tela em relação à cidade, medida em pixels (varredura arrastando)."""
         with self._lock:
@@ -94,8 +101,11 @@ class ScanStore:
                     same = gx is None and abs(v["px"] - px) <= tol and abs(v["py"] - py) <= tol
                 if same:
                     v["seen"] = time.time()
+                    v["score"] = max(v.get("score", 0), round(score, 2))
                     if label and not v.get("label"):
                         v["label"] = label
+                    v.update({a: b for a, b in extra.items() if b is not None})
+                    self.version += 1
                     return k
             if gx is not None:
                 k = f"{cat}:{gx}:{gy}"
@@ -107,6 +117,7 @@ class ScanStore:
                              "label": label, "seen": time.time(), "dist": round(dist, 2)}
             if gx is not None:
                 self.items[k].update({"gx": int(gx), "gy": int(gy)})
+            self.items[k].update({a: b for a, b in extra.items() if b is not None})
             self.version += 1
             return k
 

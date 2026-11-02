@@ -2848,21 +2848,145 @@ class MapScanner(Task):
         ctx.log("◎ Procurando: " + ", ".join(CAT_NAMES[k] for k in cats))
         f = self._home(ctx, s)
         if self._tasks_on(s) and self.store.queue and self._due_queue():
-            m0 = self._cached_calib(s, f)
-            if m0 is not None:  # volta nas tarefas que ficaram para depois, antes de varrer de novo
-                self._run_queue(ctx, s, np.linalg.inv(m0), self._view_tiles(m0, f.shape[1], f.shape[0]))
+            self._run_queue(ctx, s)  # volta nas tarefas que ficaram para depois, antes de varrer de novo
         if s.get("center") == "coordenadas abaixo":
             c = (int(s["cx"]), int(s["cy"]))
         else:
             c = self._my_city(ctx)
             if c:
                 ctx.log(f"◎ Sua cidade: X:{c[0]} Y:{c[1]}")
+        if c and self._run_sweep(ctx, s, cats, c):
+            return
         m = self._calibrate(ctx, s, *c) if c else None
         if m is None:
             ctx.log("◎ Sem coordenadas (busca do mapa ou ficha da cidade não reconhecidas) — varrendo arrastando",
                     "warn")
             return self._run_drag(ctx, s, cats)
         self._run_coords(ctx, s, cats, c, m)
+
+    def _calibrate_drag(self, ctx, c):
+        """Escala no zoom ATUAL sem pular (pular aproxima o zoom): arrasta na horizontal e na vertical, mede o
+        deslocamento real da imagem (px) e lê na barra quantas casas a câmera andou. Devolve (matriz, posição)."""
+        f = ctx.frame()
+        h, w = f.shape[:2]
+        cur, pxs, tiles = c, [], []
+        for dx, dy in ((0.33 * w, 0.0), (0.0, 0.28 * h)):
+            f, mx, my = self._move(ctx, f, dx, dy)
+            p1 = self._camera_xy(ctx)
+            f = ctx.frame()
+            if not p1:
+                return None
+            dt = (p1[0] - cur[0], p1[1] - cur[1])
+            if abs(dt[0]) + abs(dt[1]) < 3:
+                return None
+            pxs.append((mx, my))
+            tiles.append(dt)
+            cur = p1
+        P = np.array([[pxs[0][0], pxs[1][0]], [pxs[0][1], pxs[1][1]]], float)
+        T = np.array([[tiles[0][0], tiles[1][0]], [tiles[0][1], tiles[1][1]]], float)
+        if abs(np.linalg.det(T)) < 1:
+            return None
+        m = P @ np.linalg.inv(T)  # casas → pixels de câmera
+        # sanidade (medido no jogo: X anda na horizontal, Y na vertical; 1 casa entre 10 e 150 px)
+        ax, ay = np.hypot(*m[:, 0]), np.hypot(*m[:, 1])
+        if not (10 <= ax <= 150 and 10 <= ay <= 150) or abs(m[0][0]) < 2 * abs(m[1][0]) \
+                or abs(m[1][1]) < 2 * abs(m[0][1]):
+            ctx.log(f"◎ Escala medida arrastando não confere ({m.round(1).tolist()}) — usando os pulos", "warn")
+            return None
+        ctx.log(f"◎ Escala: 1 casa X = {m[0][0]:.1f} px · 1 casa Y = {m[1][1]:.1f} px (zoom do mapa)")
+        return m, cur
+
+    def _hits_cls(self, ctx, f, cats, s):
+        """[(categoria, classe, (x, y, score, w, h))] de todas as categorias num frame só."""
+        out = []
+        d = ctx.dets(f, conf=0.2) if ctx.ai_on() else {}
+        for cat in cats:
+            if ctx.vision.has(f"map_{cat}"):
+                out += [(cat, f"map_{cat}", hit) for hit in ctx.vision.find_all(f, f"map_{cat}", float(s["threshold"]))]
+            for cls in self.AI_MAP.get(cat, ()):
+                thr = max(0.35, catalog.threshold(cls, ctx.cfg))
+                out += [(cat, cls, hit) for hit in d.get(cls, []) if hit[2] >= thr]
+        return out
+
+    def _run_sweep(self, ctx, s, cats, c):
+        """Varredura rápida: UM pulo até o centro, zoom normal mais afastado, escala medida arrastando e depois
+        zigue-zague arrastando. A posição de cada tela vem da soma dos arrastos medidos e é conferida na barra de
+        coordenadas a cada poucas telas. False = não deu para medir a escala (cai na varredura por pulos)."""
+        st = self.store
+        if not self._goto(ctx, *c):
+            return False
+        self._zoom_far(ctx, s)
+        cal = self._calibrate_drag(ctx, c)
+        if not cal:
+            return False
+        m, pos = cal
+        inv = np.linalg.inv(m)
+        pos = np.array(pos, float)
+        f = ctx.frame()
+        h, w = f.shape[:2]
+        half = self._view_tiles(m, w, h)
+        step = max(3.0, half * 2 * 0.9)
+        R = int(s["radius"])
+        n = max(0, int(np.ceil(max(0.0, R - half) / step)))
+        targets = []
+        for j in range(-n, n + 1):  # zigue-zague: linha a linha, alternando o sentido
+            row = [(c[0] + i * step, c[1] + j * step) for i in range(-n, n + 1)]
+            targets += row if (j + n) % 2 == 0 else row[::-1]
+        targets = [t for t in targets if 0 <= t[0] <= 999 and 0 <= t[1] <= 999]
+        ctx.log(f"◎ Área X:{c[0]}±{R} Y:{c[1]}±{R} — {len(targets)} telas arrastando "
+                f"(cada tela ≈ {2 * half:.0f}×{2 * half:.0f} casas)")
+        st.begin_scan()
+        t0, found, since = time.time(), 0, 0
+        for k, (tx, ty) in enumerate(targets, 1):
+            for _ in range(8):  # anda até o alvo em arrastos de até ~1/3 da tela, medindo cada um
+                d = np.array([tx, ty]) - pos
+                if abs(d[0]) <= step * 0.3 and abs(d[1]) <= step * 0.3:
+                    break
+                px = m @ d
+                px = (max(-0.33 * w, min(0.33 * w, px[0])), max(-0.28 * h, min(0.28 * h, px[1])))
+                f, mx, my = self._move(ctx, f, *px)
+                pos += inv @ np.array([mx, my])
+                since += 1
+            if since >= 6:  # confere a posição na barra (não move a câmera) e corrige o acumulado
+                p = self._camera_xy(ctx)
+                if p and np.hypot(p[0] - pos[0], p[1] - pos[1]) < step:
+                    pos = np.array(p, float)
+                since = 0
+            f = ctx.frame()
+            x0, y0 = self._center(f)
+            for cat, cls, (x, y, score, tw, th) in self._hits_cls(ctx, f, cats, s):
+                if not (0.1 * w < x < 0.9 * w and 0.12 * h < y < 0.85 * h):
+                    continue  # HUD do jogo
+                tx2, ty2 = inv @ np.array([x - x0, y - y0])
+                ix, iy = int(round(pos[0] + tx2)), int(round(pos[1] + ty2))
+                if not (0 <= ix <= 999 and 0 <= iy <= 999):
+                    continue
+                st.add(cat, x - x0, y - y0, w, score, self._label(ctx, s, f, x, y, tw, th),
+                       gx=ix, gy=iy, origin=c, cls=cls)
+                found += 1
+            if k % 6 == 0:
+                st.save()
+                ctx.log(f"◎ {k}/{len(targets)} telas · {len(st.items)} itens · {time.time() - t0:.0f} s")
+        st.last_scan = time.time()
+        st.save()
+        ctx.log(f"◎ Varredura concluída em {time.time() - t0:.0f} s: {len(st.items)} itens ({found} detecções)")
+        if self._tasks_on(s):
+            self._tasks_after(ctx, s, t0)
+        return True
+
+    def _tasks_after(self, ctx, s, since):
+        """Tarefas secretas vistas nesta varredura (fora da sua aliança): pula até cada uma e decide."""
+        todo = [v for v in self.store.items.values()
+                if v["cat"] == "mission" and v.get("gx") is not None and v.get("seen", 0) >= since
+                and v.get("cls") in MAP_TASK_CLASSES and not v.get("shared") and v.get("plunders", 0) < 3]
+        if todo:
+            ctx.log(f"◎ {len(todo)} tarefa(s) secreta(s) para conferir")
+        for v in todo:
+            if self._goto(ctx, v["gx"], v["gy"]):
+                x0, y0 = self._center(ctx.frame())
+                self._handle_task(ctx, s, x0, y0, v["gx"], v["gy"])
+        self._run_queue(ctx, s)
+        self.store.save()
 
     def _run_coords(self, ctx, s, cats, c, m):
         st = self.store
@@ -3155,8 +3279,9 @@ class MapScanner(Task):
             if self._handle_task(ctx, s, *cand) and not self._goto(ctx, gx, gy):
                 return
 
-    def _run_queue(self, ctx, s, inv, half):
-        """Volta nas tarefas que ficaram para depois (ainda não prontas) e já deram a hora."""
+    def _run_queue(self, ctx, s, inv=None, half=None):
+        """Volta nas tarefas que ficaram para depois (ainda não prontas) e já deram a hora: pula até cada uma
+        (o pulo deixa a casa no centro da tela) e decide."""
         due = self._due_queue()
         if not due:
             return
@@ -3164,7 +3289,8 @@ class MapScanner(Task):
         for it in due:
             self.store.queue.remove(it)
             if self._goto(ctx, it["gx"], it["gy"]):
-                self._map_tasks(ctx, s, it["gx"], it["gy"], inv, half)
+                x0, y0 = self._center(ctx.frame())
+                self._handle_task(ctx, s, x0, y0, it["gx"], it["gy"])
         self.store.save()
 
     # --- IR -----------------------------------------------------------------
