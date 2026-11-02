@@ -121,6 +121,23 @@ class ScanStore:
             self.version += 1
             return k
 
+    THUMB_DIR = os.path.join(DATA_DIR, "mapa_fotos")
+
+    def save_thumb(self, key, frame, x, y, tw, th, size=44):
+        """Fotinho do item para a lista (recorte em volta da detecção). Devolve o nome do arquivo ou ''."""
+        try:
+            h, w = frame.shape[:2]
+            r = int(max(tw, th) * 0.8) + 4
+            crop = frame[max(0, int(y - r)):min(h, int(y + r)), max(0, int(x - r)):min(w, int(x + r))]
+            if crop.size == 0:
+                return ""
+            os.makedirs(self.THUMB_DIR, exist_ok=True)
+            name = "".join(ch if ch.isalnum() else "_" for ch in key) + ".png"
+            cv2.imwrite(os.path.join(self.THUMB_DIR, name), cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA))
+            return name
+        except Exception:
+            return ""
+
     def toggle_pin(self, k):
         self.pinned.symmetric_difference_update({k})
         self.save()

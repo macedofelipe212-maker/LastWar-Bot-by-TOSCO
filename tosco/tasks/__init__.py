@@ -2827,11 +2827,30 @@ class MapScanner(Task):
         return out
 
     def _label(self, ctx, s, f, x, y, tw, th):
-        if not (s["read_labels"] and ctx.ocr_on()):
+        """Texto em volta do item (nome do dono, nível…): recorte pequeno AMPLIADO no RapidOCR — o rótulo do mapa
+        tem letra minúscula e o OCR do Windows não lê (medido no jogo)."""
+        if not s["read_labels"]:
             return ""
         h, w = f.shape[:2]
-        crop = f[int(max(0, y - th)):int(min(h, y + th * 1.6)), int(max(0, x - tw * 1.5)):int(min(w, x + tw * 1.5))]
-        return " ".join(l.text for l in ctx.ocr.read(crop))[:60]
+        crop = f[int(max(0, y - th)):int(min(h, y + th * 1.8)), int(max(0, x - tw * 2)):int(min(w, x + tw * 2))]
+        if crop.size == 0:
+            return ""
+        if rapid.available():
+            big = cv2.resize(crop, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+            return " · ".join(t.strip() for t in rapid.read(big) if len(t.strip()) > 1)[:60]
+        return " ".join(l.text for l in ctx.ocr.read(crop))[:60] if ctx.ocr_on() else ""
+
+    def _record(self, ctx, s, f, cat, x, y, x0, y0, score, tw, th, ix, iy, origin, cls=None):
+        """Guarda o item; na 1ª vez que aparece lê o texto em volta e salva a fotinho (não repete: fica rápido)."""
+        st = self.store
+        k = st.add(cat, x - x0, y - y0, f.shape[1], score, gx=ix, gy=iy, origin=origin, cls=cls)
+        it = st.items[k]
+        if not it.get("thumb"):
+            it["thumb"] = st.save_thumb(k, f, x, y, tw, th)
+        if not it.get("label") and not it.get("_label_tried"):
+            it["label"] = self._label(ctx, s, f, x, y, tw, th)
+            it["_label_tried"] = True
+        return k
 
     def _cats(self, ctx, s):
         ai = ctx.ai_on()
@@ -2871,17 +2890,22 @@ class MapScanner(Task):
         h, w = f.shape[:2]
         cur, pxs, tiles = c, [], []
         for dx, dy in ((0.33 * w, 0.0), (0.0, 0.28 * h)):
-            f, mx, my = self._move(ctx, f, dx, dy)
-            p1 = self._camera_xy(ctx)
-            f = ctx.frame()
-            if not p1:
+            got = None
+            for sign in (1, -1):  # perto da borda do mapa a câmera não anda: tenta o outro sentido
+                f, mx, my = self._move(ctx, f, sign * dx, sign * dy)
+                p1 = self._camera_xy(ctx)
+                f = ctx.frame()
+                if not p1:
+                    continue
+                dt = (p1[0] - cur[0], p1[1] - cur[1])
+                cur = p1
+                if abs(dt[0]) + abs(dt[1]) >= 3 and abs(mx) + abs(my) >= 0.15 * (abs(dx) + abs(dy)):
+                    got = ((mx, my), dt)
+                    break
+            if not got:
                 return None
-            dt = (p1[0] - cur[0], p1[1] - cur[1])
-            if abs(dt[0]) + abs(dt[1]) < 3:
-                return None
-            pxs.append((mx, my))
-            tiles.append(dt)
-            cur = p1
+            pxs.append(got[0])
+            tiles.append(got[1])
         P = np.array([[pxs[0][0], pxs[1][0]], [pxs[0][1], pxs[1][1]]], float)
         T = np.array([[tiles[0][0], tiles[1][0]], [tiles[0][1], tiles[1][1]]], float)
         if abs(np.linalg.det(T)) < 1:
@@ -2913,6 +2937,11 @@ class MapScanner(Task):
         zigue-zague arrastando. A posição de cada tela vem da soma dos arrastos medidos e é conferida na barra de
         coordenadas a cada poucas telas. False = não deu para medir a escala (cai na varredura por pulos)."""
         st = self.store
+        R0 = int(s["radius"])
+        cc = (min(max(c[0], R0), 999 - R0), min(max(c[1], R0), 999 - R0))
+        if cc != c:  # cidade na borda: a área inteira passa a caber no mapa (e os arrastos não batem na borda)
+            ctx.log(f"◎ Sua cidade fica na borda do mapa — varrendo X:{cc[0]} Y:{cc[1]}±{R0} (dentro do mapa)")
+            c = cc
         if not self._goto(ctx, *c):
             return False
         self._zoom_far(ctx, s)
@@ -2961,8 +2990,7 @@ class MapScanner(Task):
                 ix, iy = int(round(pos[0] + tx2)), int(round(pos[1] + ty2))
                 if not (0 <= ix <= 999 and 0 <= iy <= 999):
                     continue
-                st.add(cat, x - x0, y - y0, w, score, self._label(ctx, s, f, x, y, tw, th),
-                       gx=ix, gy=iy, origin=c, cls=cls)
+                self._record(ctx, s, f, cat, x, y, x0, y0, score, tw, th, ix, iy, c, cls)
                 found += 1
             if k % 6 == 0:
                 st.save()
@@ -2970,6 +2998,10 @@ class MapScanner(Task):
         st.last_scan = time.time()
         st.save()
         ctx.log(f"◎ Varredura concluída em {time.time() - t0:.0f} s: {len(st.items)} itens ({found} detecções)")
+        if not found:
+            ctx.log("◎ Nada nesta área do que a IA reconhece no mapa: missões secretas, caminhões e alguns chefes "
+                    "(bases de jogadores, zumbis e recursos ela ainda não conhece — capture um ícone map_… no "
+                    "Estúdio de imagens para procurar outra coisa)", "warn")
         if self._tasks_on(s):
             self._tasks_after(ctx, s, t0)
         return True
@@ -3019,8 +3051,7 @@ class MapScanner(Task):
                     ix, iy = int(round(gx + tx)), int(round(gy + ty))
                     if abs(ix - c[0]) > int(s["radius"]) + half or abs(iy - c[1]) > int(s["radius"]) + half:
                         continue
-                    st.add(cat, x - x0, y - y0, w, score, self._label(ctx, s, f, x, y, tw, th),
-                           gx=ix, gy=iy, origin=c)
+                    self._record(ctx, s, f, cat, x, y, x0, y0, score, tw, th, ix, iy, c)
                     found += 1
             if self._tasks_on(s) and not s.get("ts_when", MAP_TASK_WHEN[0]).startswith("depois"):
                 self._map_tasks(ctx, s, gx, gy, inv, half)

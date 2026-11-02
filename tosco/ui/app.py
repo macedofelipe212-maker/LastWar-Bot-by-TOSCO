@@ -692,6 +692,8 @@ class MainWindow(QMainWindow):
         self.map_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.map_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.map_table.setSortingEnabled(True)
+        self.map_table.setIconSize(QSize(40, 40))
+        self.map_table.verticalHeader().setDefaultSectionSize(46)
         lay.addWidget(self.map_table, 1)
         return w
 
@@ -740,7 +742,11 @@ class MainWindow(QMainWindow):
             pin = button("★" if k in st.pinned else "☆", "ghost", lambda _=False, k=k: (st.toggle_pin(k),
                                                                                          self._fill_map(True)))
             t.setCellWidget(i, 0, pin)
-            t.setItem(i, 1, QTableWidgetItem(f"{CAT_ICONS.get(v['cat'], '')} {CAT_NAMES.get(v['cat'], v['cat'])}"))
+            tit = QTableWidgetItem(f"{CAT_ICONS.get(v['cat'], '')} {CAT_NAMES.get(v['cat'], v['cat'])}")
+            thumb = os.path.join(st.THUMB_DIR, v.get("thumb") or "")
+            if v.get("thumb") and os.path.exists(thumb):  # fotinho do item (recorte da varredura)
+                tit.setIcon(QIcon(thumb))
+            t.setItem(i, 1, tit)
             if "px" not in v:  # resultado de versão antiga do scanner
                 continue
             pos = describe_pos(v["px"], v["py"], v.get("w", 1))
