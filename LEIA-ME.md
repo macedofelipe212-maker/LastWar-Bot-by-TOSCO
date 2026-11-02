@@ -14,14 +14,16 @@ nenhum arquivo do jogo.
 
 | Grupo | Módulos |
 |---|---|
-| **Tarefa principal** (roda sem parar, escolha uma) | **Escavação Automática** — escavações, drone, ovos e festas da aliança · **Zumbis Dourados** · **Mobilizações Automáticas** — entra nos rallies dos chefes que você escolher, do maior nível que cabe no seu limite |
-| **Tarefas extras** (entram entre as rodadas) | Tarefas Diárias (loja grátis, trem, VIP, correio, baús) · Recursos · Ajuda e Tecnologia da Aliança · Esquadrão Secreto · Caminhões · Coleta no Mapa · Arena 3v3 · Corrida Armamentista · Guarda do Marechal · Primeira-Dama (cargos) |
-| **Ferramentas** | Relatórios R4/R5 em planilha · Scanner de mapa com botão **IR** · Clique automático · Rotinas que você mesmo escreve · **Estúdio visual (IA)** · **Estúdio de imagens** |
-| **Configuração** | Escudo automático · Agenda (liga, desliga ou roda módulos por dia e hora) · Controle pelo celular (Telegram) · Registro de tudo |
+| **Foco do bot** (roda sem parar, escolha um em 🎯) | **Escavações & Ovos** — escavações, drone, ovos, festas, fogos e presentes da aliança · **Zumbis Dourados & Rally** — caça, inicia e entra em mobilizações com um orçamento de energia · **Auto-Entrar em Rallies** — cada esquadrão com sua faixa de nível e posição na mobilização, listas de jogadores |
+| **Tarefas extras** (entram entre as rodadas) | Tarefas Diárias (loja, passes, trem, VIP, correio, energia grátis, baús) · Recursos (e buff do Ministro) · Hospital, Treino & Pesquisa · Heróis (só recrutamento grátis) · Aliança (ajuda, presentes, tecnologia, Estrela) · Missões Secretas (envio por raridade, Mega, aliados, Tesouro) · Caminhões · Coleta no Mapa · Arena · Corrida Armamentista · Guarda do Marechal · Primeira-Dama |
+| **Ferramentas** | Relatórios R4/R5 agendados (Excel, Texto, CSV) · **Scanner de mapa** com X/Y real e botão **IR** · Clique automático · Rotinas · **Estúdio visual (IA)** · **Estúdio de imagens** · 🩺 Teste de calibração · 📦 Pacote de diagnóstico |
+| **Configuração** | Escudo automático · Agenda (com horário aleatório e Evento Zumbis Dourados) · Controle pelo celular (Telegram) · Pausa quando você mexe no PC · Registro de tudo |
 
 Cada módulo tem dias da semana e horário próprios.
 
-![Escavação Automática](imagens/escavacao.png)
+![Escavações & Ovos](imagens/escavacao.png)
+
+![Auto-Entrar em Rallies](imagens/mobilizacoes.png)
 
 ---
 
@@ -51,9 +53,19 @@ Mostra, com **miniatura e nome em português**, cada uma das coisas que a IA rec
 - **Clique na foto** para ampliá-la ao lado de como aquilo está **no seu jogo agora**, e trocar a foto de
   exemplo pelo recorte do seu jogo — o recorte também vira a imagem do Estúdio de imagens.
 
+- **👁 Ver o que a IA vê** (barra de cima) liga uma janelinha que se atualiza a cada segundo com o que a IA
+  está reconhecendo — com o bot rodando, é o mesmo print que ele acabou de olhar.
+
 ![Estúdio visual (IA)](imagens/estudio-visual.png)
 
-![O que a IA vê no jogo](imagens/ia-ve-o-jogo.jpg)
+### Scanner de mapa
+
+Varre uma área em volta da sua cidade (ou de um X/Y escolhido): pula uma vez pela lupa do jogo, mede a escala e
+varre **arrastando** o mapa, gravando o **X/Y real** de missões secretas, caminhões, chefes e recursos. O **IR**
+leva direto até o item. A lista é acumulativa (some o que não é visto há horas). Pode também **compartilhar e
+coletar** as tarefas secretas do mapa com os critérios que você escolher.
+
+![Scanner de mapa](imagens/radar.png)
 
 ### Estúdio de imagens
 
