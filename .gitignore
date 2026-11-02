@@ -25,3 +25,8 @@ tesseract/
 
 # fotos de exemplo trocadas por você no Estúdio visual
 data/miniaturas_minhas/
+
+# prints do seu jogo (pacote de diagnóstico / teste de calibração) e dados do radar/agenda
+data/diagnostico/
+data/mapa.json
+data/evento_zumbis.json
