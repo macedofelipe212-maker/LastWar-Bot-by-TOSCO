@@ -2522,7 +2522,9 @@ class MapScanner(Task):
               Field("step", "Passo (fração da tela, modo sem coordenadas)", "float", 0.5, minimum=0.2, maximum=0.7),
               Field("zoom_out", "Afastar zoom: no máximo (giros; para antes da vista estratégica)", "int", 6,
                     minimum=0, maximum=40),
-              Field("threshold", "Limiar das suas imagens map_…", "float", 0.84, minimum=0.6, maximum=0.98),
+              Field("threshold", "Limiar das suas imagens map_…", "float", 0.75, minimum=0.6, maximum=0.98,
+                    hint="Medido no jogo: a bolha de um mesmo ícone dá 0,76–0,84 conforme o fundo; 0,75 achou "
+                         "tesouros e zumbis sem nenhum falso positivo"),
               Field("read_labels", "Ler texto ao lado do ícone", "bool", True),
               Field("calib", "Calibração (automática)", "text", "")] + MAP_TASK_FIELDS
     store = ScanStore()
@@ -2782,10 +2784,17 @@ class MapScanner(Task):
                     break
                 ctx.log(f"◎ Calibração: medida fraca ({mx:.0f},{my:.0f} px, confiança {resp:.2f}) — refazendo", "warn")
             if not got:
-                ctx.log("◎ Calibração falhou", "warn")
-                return None
+                ctx.log("◎ Não deu para medir a escala aqui — usando a escala medida antes no jogo", "warn")
+                return self._ref_matrix(self.SCALE_JUMP, a.shape[0])
             vecs.append(got)
         m = np.array([[vecs[0][0], vecs[1][0]], [vecs[0][1], vecs[1][1]]], float)  # casas → pixels
+        ref = self._ref_matrix(self.SCALE_JUMP, f.shape[0])
+        if not self._close_to(m, ref):
+            ctx.log(f"◎ Medida dos pulos fora do esperado ({m.round(1).tolist()}) — usando a escala medida antes no jogo",
+                    "warn")
+            m = ref
+            s["calib"] = json.dumps({"key": key, "m": m.tolist()})
+            return m
         v1, v2 = np.array(vecs[0]), np.array(vecs[1])
         cos = abs(v1 @ v2) / max(1e-6, np.linalg.norm(v1) * np.linalg.norm(v2))
         if abs(np.linalg.det(m)) < 1e-3 or cos > 0.7:  # X e Y quase na mesma direção = medida errada
@@ -2859,6 +2868,8 @@ class MapScanner(Task):
 
     # --- varredura ---------------------------------------------------------
     def run(self, ctx, s):
+        if abs(float(s.get("threshold", 0.75)) - 0.84) < 1e-6:
+            s["threshold"] = 0.75  # padrão antigo: alto demais para os ícones do mapa (fundo muda atrás)
         cats = self._cats(ctx, s)
         if not cats:
             ctx.log("◎ Nada para procurar: ligue a IA (Configurações) ou capture um ícone de mapa (map_…) "
@@ -2882,6 +2893,22 @@ class MapScanner(Task):
                     "warn")
             return self._run_drag(ctx, s, cats)
         self._run_coords(ctx, s, cats, c, m)
+
+    # Escala medida no jogo (PC, janela 1600×900; a interface escala pela ALTURA): 1 casa X anda na horizontal e
+    # 1 casa Y na vertical, para CIMA. Usada quando a medida do momento falha — em grama/deserto lisos a
+    # correlação de fase "escorrega" (visto no jogo: pulos exatos, medida da imagem errada).
+    SCALE_FAR = (38.7, -28.0)    # zoom normal mais afastado (o da varredura)
+    SCALE_JUMP = (69.9, -47.7)   # zoom em que o pulo pela busca deixa a câmera
+
+    @staticmethod
+    def _ref_matrix(scale, h):
+        k = h / 900.0
+        return np.array([[scale[0] * k, 0.0], [0.0, scale[1] * k]])
+
+    @staticmethod
+    def _close_to(m, ref, tol=0.35):
+        """A matriz medida está a menos de tol (35 %) da referência em X e em Y?"""
+        return all(abs(m[i][i] - ref[i][i]) <= tol * abs(ref[i][i]) for i in (0, 1)) and             abs(m[1][0]) < 0.25 * abs(ref[0][0]) and abs(m[0][1]) < 0.25 * abs(ref[1][1])
 
     def _calibrate_drag(self, ctx, c):
         """Escala no zoom ATUAL sem pular (pular aproxima o zoom): arrasta na horizontal e na vertical, mede o
@@ -2945,10 +2972,14 @@ class MapScanner(Task):
         if not self._goto(ctx, *c):
             return False
         self._zoom_far(ctx, s)
+        h0 = ctx.frame(fresh=False).shape[0]
+        ref = self._ref_matrix(self.SCALE_FAR, h0)
         cal = self._calibrate_drag(ctx, c)
-        if not cal:
-            return False
-        m, pos = cal
+        if cal and self._close_to(cal[0], ref):
+            m, pos = cal
+        else:
+            m, pos = ref, (cal[1] if cal else (self._camera_xy(ctx) or c))
+            ctx.log(f"◎ Usando a escala medida antes no jogo: 1 casa X = {m[0][0]:.1f} px · Y = {m[1][1]:.1f} px")
         inv = np.linalg.inv(m)
         pos = np.array(pos, float)
         f = ctx.frame()
@@ -3006,6 +3037,23 @@ class MapScanner(Task):
             self._tasks_after(ctx, s, t0)
         return True
 
+    def _find_near(self, ctx, s, item):
+        """Depois do pulo até o X/Y gravado: procura o item na tela e devolve o mais perto do centro (x, y). A
+        posição gravada pode errar algumas casas (visto no jogo: ~4); corrige o X/Y do item com a diferença."""
+        f = ctx.frame()
+        h, w = f.shape[:2]
+        x0, y0 = self._center(f)
+        hits = [hit for cat, cls, hit in self._hits_cls(ctx, f, [item["cat"]], s)
+                if (not item.get("cls") or cls == item["cls"]) and abs(hit[0] - x0) < 0.4 * w and abs(hit[1] - y0) < 0.38 * h]
+        if not hits:
+            return x0, y0
+        x, y = min(hits, key=lambda d: (d[0] - x0) ** 2 + (d[1] - y0) ** 2)[:2]
+        dt = np.linalg.inv(self._ref_matrix(self.SCALE_JUMP, h)) @ np.array([x - x0, y - y0])
+        if abs(dt[0]) >= 1 or abs(dt[1]) >= 1:
+            item["gx"], item["gy"] = int(round(item["gx"] + dt[0])), int(round(item["gy"] + dt[1]))
+            self.store.save()
+        return x, y
+
     def _tasks_after(self, ctx, s, since):
         """Tarefas secretas vistas nesta varredura (fora da sua aliança): pula até cada uma e decide."""
         todo = [v for v in self.store.items.values()
@@ -3015,7 +3063,7 @@ class MapScanner(Task):
             ctx.log(f"◎ {len(todo)} tarefa(s) secreta(s) para conferir")
         for v in todo:
             if self._goto(ctx, v["gx"], v["gy"]):
-                x0, y0 = self._center(ctx.frame())
+                x0, y0 = self._find_near(ctx, s, v)
                 self._handle_task(ctx, s, x0, y0, v["gx"], v["gy"])
         self._run_queue(ctx, s)
         self.store.save()
@@ -3320,7 +3368,7 @@ class MapScanner(Task):
         for it in due:
             self.store.queue.remove(it)
             if self._goto(ctx, it["gx"], it["gy"]):
-                x0, y0 = self._center(ctx.frame())
+                x0, y0 = self._find_near(ctx, s, {"cat": "mission", "gx": it["gx"], "gy": it["gy"]})
                 self._handle_task(ctx, s, x0, y0, it["gx"], it["gy"])
         self.store.save()
 
@@ -3332,8 +3380,7 @@ class MapScanner(Task):
         if item.get("gx") is not None:
             ctx.to_world()
             if self._goto(ctx, item["gx"], item["gy"]):
-                f = ctx.frame()
-                cx, cy = self._center(f)
+                cx, cy = self._find_near(ctx, s, item)  # toca no item de verdade, não no centro
                 ctx.tap_xy(int(cx), int(cy), spread=1)
                 ctx.sleep(1.2)
                 ctx.log(f"◎ Cheguei em X:{item['gx']} Y:{item['gy']}")

@@ -4,5 +4,37 @@
  "btn_to_base": 2309,
  "bubble_gold": 1163,
  "bubble_food": 1163,
- "bubble_iron": 1163
+ "bubble_iron": 1163,
+ "map_star_party": {
+  "w": 1600,
+  "h": 900
+ },
+ "map_season": {
+  "w": 1600,
+  "h": 900
+ },
+ "map_zombie": {
+  "w": 1600,
+  "h": 900
+ },
+ "map_zombie@2": {
+  "w": 1600,
+  "h": 900
+ },
+ "map_zombie@3": {
+  "w": 1600,
+  "h": 900
+ },
+ "map_season@2": {
+  "w": 1600,
+  "h": 900
+ },
+ "map_zombie@4": {
+  "w": 1600,
+  "h": 900
+ },
+ "map_zombie@5": {
+  "w": 1600,
+  "h": 900
+ }
 }

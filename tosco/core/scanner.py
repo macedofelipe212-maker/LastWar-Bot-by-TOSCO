@@ -16,7 +16,7 @@ CATEGORIES = [
     ("truck", "Caminhões", "⛟"), ("train", "Trens", "🚆"), ("mission", "Missões", "✦"),
     ("ghost_ops", "Ghost Ops", "👻"), ("gold_zombie", "Zumbi Dourado", "☣"), ("boss", "Chefes", "☠"),
     ("res_food", "Comida", "🌾"), ("res_iron", "Ferro", "⛏"), ("res_gold", "Ouro", "◎"),
-    ("star_party", "Festa Estelar", "★"), ("season", "Achados da Temporada", "◈"),
+    ("star_party", "Festa Estelar", "★"), ("season", "Achados da Temporada", "◈"), ("zombie", "Zumbis", "🧟"),
     ("custom_1", "Personalizado 1", "①"), ("custom_2", "Personalizado 2", "②"),
 ]
 CAT_NAMES = {k: n for k, n, _ in CATEGORIES}
