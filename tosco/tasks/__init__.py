@@ -2637,9 +2637,14 @@ class MapScanner(Task):
         """X e Y escritos na barra: cada campo recortado pela IA (coord_input) ou pela posição medida."""
         h, w = f.shape[:2]
         boxes = sorted(ctx.dets(f, 0.4).get("coord_input", []), key=lambda b: b[0])[:2]
-        if len(boxes) < 2:  # sem os dois campos da IA: posição medida a partir da lupinha
-            bw, bh = 0.08 * h, 0.034 * h
-            boxes = [(icon[0] - dx * h, icon[1] - self.BAR_DY * h, 0, bw, bh) for dx in (self.BAR_X, self.BAR_Y)]
+        if len(boxes) < 2:
+            # a IA às vezes acha só um dos campos (visto no jogo: só o X). Os números ficam na MESMA linha da
+            # lupinha (o recorte antigo, 1 % mais alto, pegava só a metade de cima: "417" virava "17")
+            ex = {self.BAR_X: icon[0] - self.BAR_X * h, self.BAR_Y: icon[0] - self.BAR_Y * h}
+            ref = boxes[0] if boxes else (0, icon[1], 0, 0.08 * h, 0.036 * h)
+            y, bw, bh = ref[1], max(ref[3], 0.08 * h), max(ref[4], 0.036 * h)
+            got = {min(ex, key=lambda k: abs(ex[k] - boxes[0][0])): boxes[0]} if boxes else {}
+            boxes = [got.get(k) or (ex[k], y, 0, bw, bh) for k in (self.BAR_X, self.BAR_Y)]
         cands = []
         for x, y, _, bw, bh in boxes:
             crop = f[max(0, int(y - bh / 2)):int(y + bh / 2), max(0, int(x - bw / 2)):int(x + bw / 2)]
@@ -2653,7 +2658,13 @@ class MapScanner(Task):
 
     def _open_search(self, ctx):
         """Abre a busca da lupa e devolve o ícone da barra de coordenadas (ou None)."""
-        if not ctx.tap("btn_search", 2, after=1.0):
+        # IA primeiro (visto no TOSCO do usuário: uma imagem da lupa capturada em outro tamanho de janela casava
+        # com outro ícone azul redondo e o toque caía fora; a IA acha a lupa com 0,93–0,96)
+        lupa = ctx.ai("btn_search", ctx.frame())
+        if lupa:
+            ctx.tap_xy(int(lupa[0][0]), int(lupa[0][1]), spread=1)
+            ctx.sleep(1.0)
+        elif not ctx.tap("btn_search", 2, after=1.0):
             return None
         for _ in range(4):
             icon = self._bar_icon(ctx)
@@ -2872,6 +2883,16 @@ class MapScanner(Task):
 
     # --- varredura ---------------------------------------------------------
     def run(self, ctx, s):
+        """Sempre com o modelo PRECISO da IA (visto no TOSCO do usuário: com o 'rápido' a lupinha da barra de
+        coordenadas some e o radar inteiro falha); a escolha do usuário volta no fim."""
+        old = ctx.cfg.get("ai_model")
+        ctx.cfg["ai_model"] = "preciso"
+        try:
+            return self._run(ctx, s)
+        finally:
+            ctx.cfg["ai_model"] = old
+
+    def _run(self, ctx, s):
         if abs(float(s.get("threshold", 0.75)) - 0.84) < 1e-6:
             s["threshold"] = 0.75  # padrão antigo: alto demais para os ícones do mapa (fundo muda atrás)
         cats = self._cats(ctx, s)
@@ -3380,6 +3401,14 @@ class MapScanner(Task):
 
     # --- IR -----------------------------------------------------------------
     def go(self, ctx, item, key=None):
+        old = ctx.cfg.get("ai_model")
+        ctx.cfg["ai_model"] = "preciso"  # ver run(): o modelo rápido não vê a barra de coordenadas
+        try:
+            return self._go(ctx, item, key)
+        finally:
+            ctx.cfg["ai_model"] = old
+
+    def _go(self, ctx, item, key=None):
         """IR: com X/Y, pula direto pela busca do mapa e abre a ficha no centro. Sem X/Y (varredura antiga):
         favoritos do jogo, ou volta para a cidade e anda medindo até ele."""
         s = ctx.e.cfg.task(self.id, self.defaults())
