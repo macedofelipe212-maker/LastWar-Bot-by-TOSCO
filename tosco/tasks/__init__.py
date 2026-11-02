@@ -2713,19 +2713,22 @@ class MapScanner(Task):
             ctx.tap_xy(int(hb[0]), int(hb[1]), spread=1)
             ctx.sleep(2.0)
         ref = ctx.frame()
+        self._city_guess = None
         xy = self._camera_xy(ctx)
         cands = getattr(self, "_bar_cands", None) or []
         pairs = [xy] if xy else []
         if len(cands) == 2:  # alternativas do OCR, caso a primeira leitura esteja errada
             pairs += [(a, b) for a in cands[0][:2] for b in cands[1][:3] if (a, b) not in pairs]
-        # o erro típico do OCR é trocar o 1º dígito (417 → 217/117): tenta essas variações por último
-        for a, b in list(pairs[:3]):
+        # erros típicos do OCR no 1º dígito: COMER (417 → 17, visto no seu TOSCO) ou TROCAR (417 → 217)
+        for a, b in list(pairs[:2]):
             for d in "123456789":
-                for alt in ((a, int(d + str(b)[1:])) if len(str(b)) > 1 else None,
+                for alt in ((a, int(d + str(b))), (int(d + str(a)), b),
+                            (a, int(d + str(b)[1:])) if len(str(b)) > 1 else None,
                             (int(d + str(a)[1:]), b) if len(str(a)) > 1 else None):
                     if alt and alt not in pairs and max(alt) < 1000:
                         pairs.append(alt)
-        for p in pairs[:12]:
+        self._city_guess = xy
+        for p in pairs[:24]:
             # confere: pula para o X/Y lido. A casinha do mapa (home_btn, "N km") só aparece LONGE da sua cidade:
             # se ela aparecer, a leitura está errada. (Comparar imagens enganava: neve parece neve.)
             if not self._goto(ctx, *p):
@@ -2734,7 +2737,8 @@ class MapScanner(Task):
             if not ctx.seen("home_btn", 0.45, here) and self._same_place(ref, here):
                 return p
             ctx.log(f"◎ Leitura X:{p[0]} Y:{p[1]} não bate com a cidade — tentando outra", "warn")
-        ctx.log("◎ Não consegui confirmar o X/Y da sua cidade — use 'Centro: coordenadas' na página do mapa", "warn")
+        ctx.log("◎ Não consegui confirmar o X/Y da sua cidade — varrendo em volta da leitura (as posições "
+                "continuam certas: o radar pula e sabe onde está)", "warn")
         return None
 
     @staticmethod
@@ -2885,6 +2889,8 @@ class MapScanner(Task):
             c = self._my_city(ctx)
             if c:
                 ctx.log(f"◎ Sua cidade: X:{c[0]} Y:{c[1]}")
+            elif getattr(self, "_city_guess", None):
+                c = tuple(self._city_guess)  # o pulo até lá deixa a posição exata; só o centro fica aproximado
         if c and self._run_sweep(ctx, s, cats, c):
             return
         m = self._calibrate(ctx, s, *c) if c else None
